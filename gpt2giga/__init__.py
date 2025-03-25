@@ -2,6 +2,7 @@ import argparse
 import array
 import base64
 import http.server
+import importlib.resources
 import json
 import logging
 import os
@@ -281,6 +282,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             yield process_gigachat_stream(chunk, gpt_model, is_tool_call)
 
     def do_GET(self):
+        print(self.path)
         if self.path in ("/models", "/v1/models"):
             self.handle_models_request()
         else:
@@ -452,8 +454,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         Handles requests to /models or /v1/models by returning the gpt2giga_models.json content.
         """
         try:
-            with open("gpt2giga_models.json", "r", encoding="utf-8") as f:
-                models_data = json.load(f)
+            models_data = json.load(importlib.resources.open_text("gpt2giga", "gpt2giga_models.json"))
 
             response_data = json.dumps(models_data, ensure_ascii=False).encode("utf-8")
 
