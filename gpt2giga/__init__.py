@@ -282,7 +282,6 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             yield process_gigachat_stream(chunk, gpt_model, is_tool_call)
 
     def do_GET(self):
-        print(self.path)
         if self.path in ("/models", "/v1/models"):
             self.handle_models_request()
         else:
