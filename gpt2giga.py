@@ -88,11 +88,11 @@ def process_gigachat_stream(giga_resp: ChatCompletionChunk, gpt_model: str) -> d
         choice["logprobs"] = None
         if choice["delta"].get("function_call"):
             arguments = json.dumps(
-                choice["message"]["function_call"]["arguments"],
+                choice["delta"]["function_call"]["arguments"],
                 ensure_ascii=False,
             )
-            choice["message"]["function_call"] = {
-                "name": choice["message"]["function_call"]["name"],
+            choice["delta"]["function_call"] = {
+                "name": choice["delta"]["function_call"]["name"],
                 "arguments": arguments,
             }
             if choice["delta"].get("content") == "":
@@ -176,10 +176,18 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             data["temperature"] = temperature
 
         if "functions" not in data and data.get("tools"):
-            data["functions"] = [
-                tool["function"] for tool in data.get("tools", []) if tool["type"] == "function"
-            ]
+            functions = []
+            for tool in data["tools"]:
+                if tool["type"] == "function":
+                    if "function" in tool:
+                        functions.append(tool["function"])
+                    else:
+                        functions.append(tool)
+            data["functions"] = functions
 
+        messages = data.get("messages", None)
+        if messages is None:
+            data["messages"] = data["input"]
         for i, message in enumerate(data["messages"]):
             message.pop("name", None)
             # No non-first system messages available.
@@ -422,10 +430,10 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_models_request(self):
         """
-        Handles requests to /models or /v1/models by returning the models.json content.
+        Handles requests to /models or /v1/models by returning the gpt2giga_models.json content.
         """
         try:
-            with open("models.json", "r", encoding="utf-8") as f:
+            with open("gpt2giga_models.json", "r", encoding="utf-8") as f:
                 models_data = json.load(f)
 
             response_data = json.dumps(models_data, ensure_ascii=False).encode("utf-8")
@@ -437,7 +445,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(response_data)
         except FileNotFoundError:
-            self.send_error(404, "models.json not found")
+            self.send_error(404, "gpt2giga_models.json not found")
         except Exception as e:
             logging.error(f"Error handling /v1/models request: {e}", exc_info=True)
             self.send_error(500, "Internal Server Error")
