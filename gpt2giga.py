@@ -20,13 +20,14 @@ from gigachat.models import Chat, ChatCompletion, ChatCompletionChunk, Messages
 from gigachat.settings import SCOPE, BASE_URL
 
 
-def process_gigachat_response(giga_resp: ChatCompletion, gpt_model: str) -> dict:
+def process_gigachat_response(giga_resp: ChatCompletion, gpt_model: str, is_tool_call: bool = False) -> dict:
     """
     Processes the response from GigaChat API and transforms it to the format expected by the client.
 
     Args:
         giga_resp: The response from GigaChat API.
         gpt_model: The GPT model name.
+        is_tool_call: True if app waiting for tool calls to return, false if waiting for function_call
 
     Returns:
         A dictionary formatted as the client's expected response.
@@ -51,6 +52,12 @@ def process_gigachat_response(giga_resp: ChatCompletion, gpt_model: str) -> dict
                     choice["message"]["content"] = None
                 choice["message"].pop("functions_state_id", None)
                 choice["message"]["refusal"] = None
+                if is_tool_call:
+                    choice["message"]["tool_calls"] = [{
+                        "id": f"call_{uuid.uuid4()}",
+                        "type": "function",
+                        "function": choice["message"].pop("function_call")
+                    }]
 
     result = {
         "id": "chatcmpl-" + str(uuid.uuid4()),
@@ -70,13 +77,14 @@ def process_gigachat_response(giga_resp: ChatCompletion, gpt_model: str) -> dict
     return result
 
 
-def process_gigachat_stream(giga_resp: ChatCompletionChunk, gpt_model: str) -> dict:
+def process_gigachat_stream(giga_resp: ChatCompletionChunk, gpt_model: str, is_tool_call: bool = False) -> dict:
     """
     Processes the response from GigaChat API stream and transforms it to the format expected by the client.
 
     Args:
         giga_resp: The response from GigaChat API stream.
         gpt_model: The GPT model name.
+        is_tool_call: True if app waiting for tool calls to return, false if waiting for function_call
 
     Returns:
         A dictionary formatted as the client's expected response.
@@ -98,6 +106,12 @@ def process_gigachat_stream(giga_resp: ChatCompletionChunk, gpt_model: str) -> d
             if choice["delta"].get("content") == "":
                 choice["delta"]["content"] = None
             choice["delta"].pop("functions_state_id", None)
+            if is_tool_call:
+                choice["delta"]["tool_calls"] = [{
+                    "id": f"call_{uuid.uuid4()}",
+                    "type": "function",
+                    "function": choice["delta"].pop("function_call")
+                }]
     usage = None
     if giga_dict.get("usage", None) is not None:
         usage = {
@@ -198,6 +212,9 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 message["content"] = json.dumps(message.get("content", ""), ensure_ascii=False)
             if message["content"] is None:
                 message["content"] = ""
+            if "tool_calls" in message and len(message["tool_calls"]) > 0:
+                message["function_call"] = message["tool_calls"][0]["function"]
+                message["function_call"]["arguments"] = json.loads(message["function_call"]["arguments"])
 
         chat = Chat.parse_obj(data)
         return chat, gpt_model
@@ -239,10 +256,11 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             The processed response dictionary.
         """
 
+        is_tool_call = "tools" in data
         chat, gpt_model = self.transform_input_data(data)
         chat.messages = self.collapse_messages(chat.messages)
         giga_resp = self.giga.chat(chat)
-        result = process_gigachat_response(giga_resp, gpt_model)
+        result = process_gigachat_response(giga_resp, gpt_model, is_tool_call)
         return result
 
     def send_to_gigachat_stream(self, data: dict) -> Iterator[dict]:
@@ -256,10 +274,11 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             The processed response dictionary.
         """
 
+        is_tool_call = "tools" in data
         chat, gpt_model = self.transform_input_data(data)
         chat.messages = self.collapse_messages(chat.messages)
         for chunk in self.giga.stream(chat):
-            yield process_gigachat_stream(chunk, gpt_model)
+            yield process_gigachat_stream(chunk, gpt_model, is_tool_call)
 
     def do_GET(self):
         if self.path in ("/models", "/v1/models"):
