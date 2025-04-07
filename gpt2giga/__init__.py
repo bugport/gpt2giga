@@ -217,7 +217,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 message["function_call"] = message["tool_calls"][0]["function"]
                 message["function_call"]["arguments"] = json.loads(message["function_call"]["arguments"])
             if isinstance(message["content"], list):
-                message["content"] = "\n".join([part.get("text") for part in message["content"] if part.get("type") == "text"])
+                message["content"] = "\n".join([part.get("text", "") for part in message["content"] if part.get("type") == "text"])
 
         chat = Chat.parse_obj(data)
         return chat, gpt_model
