@@ -483,7 +483,8 @@ def run_proxy_server(host: str, port: int,
                      base_url: str = BASE_URL,
                      model: str = GIGACHAT_MODEL,
                      timeout: int = 600,
-                     embeddings: str = "EmbeddingsGigaR"):
+                     embeddings: str = "EmbeddingsGigaR",
+                     verify_ssl_certs: bool = True):
     """
     Runs the proxy server.
 
@@ -500,7 +501,7 @@ def run_proxy_server(host: str, port: int,
     """
     server_address = (host, port)
     ProxyHandler.verbose = verbose
-    ProxyHandler.giga = GigaChat(base_url=base_url, model=model, timeout=timeout, profanity_check=False)
+    ProxyHandler.giga = GigaChat(base_url=base_url, model=model, timeout=timeout, verify_ssl_certs=verify_ssl_certs, profanity_check=False)
     ProxyHandler.pass_token = pass_token
     ProxyHandler.pass_model = pass_model
     ProxyHandler.embeddings = embeddings
@@ -577,6 +578,12 @@ def main():
         default=None,
         help="Path to .env file (including .env file name)",
     )
+    parser.add_argument(
+        "--verify-ssl-certs",
+        type=str,
+        default=None,
+        help="Bypass security certificates errors",
+    )
 
     args = parser.parse_args()
 
@@ -593,6 +600,7 @@ def main():
         "model": os.getenv("GIGACHAT_MODEL", GIGACHAT_MODEL),
         "timeout": os.getenv("GPT2GIGA_TIMEOUT", 600),
         "embeddings": os.getenv("GPT2GIGA_EMBEDDINGS", "EmbeddingsGigaR"),
+        "verify_ssl_certs": os.getenv("VERIFY_SSL_CERTS", "True") != "False",
     }
     for key, value in defaults.items():
         if getattr(args, key) is None:
@@ -602,7 +610,7 @@ def main():
         args.host, args.port, args.verbose,
         args.pass_model, args.pass_token,
         args.base_url, args.model, args.timeout,
-        args.embeddings
+        args.embeddings, args.verify_ssl_certs
     )
 
 
