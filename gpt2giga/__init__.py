@@ -1,19 +1,24 @@
 import argparse
 import array
 import base64
+import hashlib
 import http.server
 import importlib.resources
+import io
 import json
 import logging
 import os
+import re
 import socketserver
 import time
 import uuid
 import warnings
 from functools import lru_cache
-from typing import Optional, Tuple, List, Iterator
+from typing import Optional, Tuple, List, Iterator, Dict
 
+import httpx
 import tiktoken
+from PIL import Image
 from dotenv import find_dotenv, load_dotenv
 from gigachat import GigaChat
 from gigachat.client import GIGACHAT_MODEL
@@ -162,6 +167,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     pass_token: bool = False
     pass_model: bool = False
     embeddings: str = "EmbeddingsGigaR"
+    enable_images: bool = False
+    image_cache: Dict[str, str] = {}
 
     def __init__(self, *args, **kwargs):
         self.giga = self.__class__.giga
@@ -169,7 +176,45 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         self.pass_token = self.__class__.pass_token
         self.pass_model = self.__class__.pass_model
         self.embeddings = self.__class__.embeddings
+        self.enable_images = self.__class__.enable_images
+        self.image_cache = self.__class__.image_cache
         super().__init__(*args, **kwargs)
+
+    def __upload_image(self, image_url):
+        base64_matches = re.search(r"data:(.+);(.+),(.+)", image_url)
+        hashed = hashlib.sha256(image_url.encode()).hexdigest()
+        if hashed not in self.image_cache:
+            if not base64_matches:
+                try:
+                    response = httpx.get(image_url, timeout=30)
+                    content_type = response.headers.get('content-type', "")
+                    content_bytes = response.content
+                    if not content_type.startswith("image/"):
+                        return None
+                except Exception as e:
+                    print(e)
+                    print('Error in loading chat image!')
+                    return None
+            else:
+                content_type, type_, image_str = base64_matches.groups()
+                if type_ != "base64":
+                    return None
+                content_bytes = base64.b64decode(image_str)
+
+            image = Image.open(io.BytesIO(content_bytes)).convert("RGB")
+            buf = io.BytesIO()
+            image.save(buf, format='JPEG')
+
+            file = self.giga.upload_file(
+                (
+                    f"{uuid.uuid4()}.jpg",
+                    buf,
+                )
+            )
+
+            self.image_cache[hashed] = file.id_
+            return file.id_
+        return self.image_cache[hashed]
 
     def transform_input_data(self, data: dict) -> Tuple[Chat, Optional[str]]:
         """
@@ -203,6 +248,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         messages = data.get("messages", None)
         if messages is None:
             data["messages"] = data["input"]
+        find_images_flag = False
+        attachment_count = 0
         for i, message in enumerate(data["messages"]):
             message.pop("name", None)
             # No non-first system messages available.
@@ -217,7 +264,32 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 message["function_call"] = message["tool_calls"][0]["function"]
                 message["function_call"]["arguments"] = json.loads(message["function_call"]["arguments"])
             if isinstance(message["content"], list):
-                message["content"] = "\n".join([part.get("text", "") for part in message["content"] if part.get("type") == "text"])
+                texts = []
+                attachments = []
+                for content_part in message["content"]:
+                    if content_part.get("type") == "text":
+                        texts.append(content_part.get("text", ""))
+                    elif content_part.get("type") == "image_url" and content_part.get("image_url"):
+                        find_images_flag = True
+                        if not self.enable_images:
+                            continue
+                        file = self.__upload_image(content_part["image_url"]["url"])
+                        if file is not None:
+                            attachments.append(file)
+                        attachment_count += 1
+                if len(attachments) > 2:
+                    print('GigaChat can only handle 2 images in message! Cutting it off.')
+                    attachments = attachments[:2]
+                message["content"] = "\n".join(texts)
+                message["attachments"] = attachments
+        if find_images_flag and not self.enable_images:
+            print('Proxy get chat with images, but flag --enable-images is disabled.')
+        if attachment_count > 10:
+            cur_attachment_count = 0
+            for message in reversed(data["messages"]):
+                cur_attachment_count += len(message.get("attachments", []))
+                if cur_attachment_count > 10:
+                    message["attachments"] = []
 
         chat = Chat.parse_obj(data)
         return chat, gpt_model
@@ -483,7 +555,8 @@ def run_proxy_server(host: str, port: int,
                      base_url: str = BASE_URL,
                      model: str = GIGACHAT_MODEL,
                      timeout: int = 600,
-                     embeddings: str = "EmbeddingsGigaR"):
+                     embeddings: str = "EmbeddingsGigaR",
+                     enable_images: bool = False,):
     """
     Runs the proxy server.
 
@@ -504,6 +577,8 @@ def run_proxy_server(host: str, port: int,
     ProxyHandler.pass_token = pass_token
     ProxyHandler.pass_model = pass_model
     ProxyHandler.embeddings = embeddings
+    ProxyHandler.enable_images = enable_images
+    ProxyHandler.image_cache = {}
 
     logging_level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(level=logging_level)
@@ -546,6 +621,12 @@ def main():
         action="store_true",
         default=None,
         help="Pass token from request to API"
+    )
+    parser.add_argument(
+        "--enable-images",
+        action="store_true",
+        default=None,
+        help="Enable images auto-upload",
     )
     parser.add_argument(
         "--base-url",
@@ -593,6 +674,7 @@ def main():
         "model": os.getenv("GIGACHAT_MODEL", GIGACHAT_MODEL),
         "timeout": os.getenv("GPT2GIGA_TIMEOUT", 600),
         "embeddings": os.getenv("GPT2GIGA_EMBEDDINGS", "EmbeddingsGigaR"),
+        "enable_images": os.getenv("GPT2GIGA_ENABLE_IMAGES", "False") != "False",
     }
     for key, value in defaults.items():
         if getattr(args, key) is None:
@@ -602,7 +684,7 @@ def main():
         args.host, args.port, args.verbose,
         args.pass_model, args.pass_token,
         args.base_url, args.model, args.timeout,
-        args.embeddings
+        args.embeddings, args.enable_images
     )
 
 
