@@ -257,10 +257,13 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 message["role"] = "user"
             if message["role"] == "tool":
                 message["role"] = "function"
-                message["content"] = json.dumps(message.get("content", ""), ensure_ascii=False)
+                try:
+                    json.loads(message.get("content", ""))
+                except json.JSONDecodeError:
+                    message["content"] = json.dumps(message.get("content", ""), ensure_ascii=False)
             if message["content"] is None:
                 message["content"] = ""
-            if "tool_calls" in message and len(message["tool_calls"]) > 0:
+            if "tool_calls" in message and message["tool_calls"] is not None and len(message["tool_calls"]) > 0:
                 message["function_call"] = message["tool_calls"][0]["function"]
                 message["function_call"]["arguments"] = json.loads(message["function_call"]["arguments"])
             if isinstance(message["content"], list):
