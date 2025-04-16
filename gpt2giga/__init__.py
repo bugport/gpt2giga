@@ -671,7 +671,7 @@ def main():
     )
     parser.add_argument(
         "--verify-ssl-certs",
-        type="store_true",
+        action="store_true",
         default=None,
         help="Bypass security certificates errors",
     )
