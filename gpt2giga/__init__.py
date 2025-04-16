@@ -559,7 +559,8 @@ def run_proxy_server(host: str, port: int,
                      model: str = GIGACHAT_MODEL,
                      timeout: int = 600,
                      embeddings: str = "EmbeddingsGigaR",
-                     enable_images: bool = False,):
+                     verify_ssl_certs: bool = False,
+                     enable_images: bool = False):
     """
     Runs the proxy server.
 
@@ -573,10 +574,17 @@ def run_proxy_server(host: str, port: int,
         model: Model for requests
         timeout: Timeout
         embeddings: Embeddings model
+        verify_ssl_certs: Verify SSL certificates
     """
     server_address = (host, port)
     ProxyHandler.verbose = verbose
-    ProxyHandler.giga = GigaChat(base_url=base_url, model=model, timeout=timeout, profanity_check=False)
+    ProxyHandler.giga = GigaChat(
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        verify_ssl_certs=verify_ssl_certs,
+        profanity_check=os.getenv('GIGACHAT_PROFANITY_CHECK', False)
+    )
     ProxyHandler.pass_token = pass_token
     ProxyHandler.pass_model = pass_model
     ProxyHandler.embeddings = embeddings
@@ -661,6 +669,12 @@ def main():
         default=None,
         help="Path to .env file (including .env file name)",
     )
+    parser.add_argument(
+        "--verify-ssl-certs",
+        action="store_true",
+        default=None,
+        help="Bypass security certificates errors",
+    )
 
     args = parser.parse_args()
 
@@ -677,6 +691,7 @@ def main():
         "model": os.getenv("GIGACHAT_MODEL", GIGACHAT_MODEL),
         "timeout": os.getenv("GPT2GIGA_TIMEOUT", 600),
         "embeddings": os.getenv("GPT2GIGA_EMBEDDINGS", "EmbeddingsGigaR"),
+        "verify_ssl_certs": os.getenv("GIGACHAT_VERIFY_SSL_CERTS", "False") != "False",
         "enable_images": os.getenv("GPT2GIGA_ENABLE_IMAGES", "False") != "False",
     }
     for key, value in defaults.items():
@@ -687,7 +702,8 @@ def main():
         args.host, args.port, args.verbose,
         args.pass_model, args.pass_token,
         args.base_url, args.model, args.timeout,
-        args.embeddings, args.enable_images
+        args.embeddings, args.verify_ssl_certs,
+        args.enable_images, 
     )
 
 
