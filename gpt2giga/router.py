@@ -107,6 +107,10 @@ def _get_metrics_state(app):
             "pool_rebuilds": 0,
             "durations_ms": [],
             "max_samples": 200,
+            "queue_enqueued": 0,
+            "queue_processed": 0,
+            "queue_dropped": 0,
+            "queue_size": 0,
         }
         app.state._metrics = state
     return state
@@ -145,9 +149,23 @@ async def _ensure_emb_queue(app):
                         result = await _embeddings_async(request)
                         if not fut.cancelled():
                             fut.set_result(result)
+                        # Track queue metrics
+                        try:
+                            metrics = _get_metrics_state(app)
+                            metrics["queue_processed"] = metrics.get("queue_processed", 0) + 1
+                            metrics["queue_size"] = app.state._emb_queue.qsize()
+                        except Exception:
+                            pass
                     except Exception as e:
                         if not fut.cancelled():
                             fut.set_exception(e)
+                        # Track queue metrics even on error
+                        try:
+                            metrics = _get_metrics_state(app)
+                            metrics["queue_processed"] = metrics.get("queue_processed", 0) + 1
+                            metrics["queue_size"] = app.state._emb_queue.qsize()
+                        except Exception:
+                            pass
                     finally:
                         app.state._emb_queue.task_done()
                 except asyncio.CancelledError:
@@ -738,6 +756,18 @@ async def metrics(request: Request):
     lines.append(f"emb_p50_ms {p50:.3f}")
     lines.append(f"emb_p95_ms {p95:.3f}")
     lines.append(f"emb_p99_ms {p99:.3f}")
+    # Queue metrics
+    lines.append(f"queue_enqueued {int(m.get('queue_enqueued', 0) or 0)}")
+    lines.append(f"queue_processed {int(m.get('queue_processed', 0) or 0)}")
+    lines.append(f"queue_dropped {int(m.get('queue_dropped', 0) or 0)}")
+    # Current queue size (live)
+    try:
+        if hasattr(request.app.state, "_emb_queue"):
+            lines.append(f"queue_size {request.app.state._emb_queue.qsize()}")
+        else:
+            lines.append(f"queue_size {int(m.get('queue_size', 0) or 0)}")
+    except Exception:
+        lines.append(f"queue_size {int(m.get('queue_size', 0) or 0)}")
     return Response("\n".join(lines) + "\n", media_type="text/plain")
 
 
@@ -755,10 +785,20 @@ async def embeddings(request: Request):
     await _ensure_emb_queue(request.app)
     if hasattr(request.app.state, "_emb_queue"):
         q: asyncio.Queue = request.app.state._emb_queue
+        metrics = _get_metrics_state(request.app)
         if q.full():
+            try:
+                metrics["queue_dropped"] = metrics.get("queue_dropped", 0) + 1
+            except Exception:
+                pass
             return Response(status_code=429, content=json.dumps({"error": "queue_full"}), media_type="application/json")
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         await q.put((request, fut))
+        try:
+            metrics["queue_enqueued"] = metrics.get("queue_enqueued", 0) + 1
+            metrics["queue_size"] = q.qsize()
+        except Exception:
+            pass
         return await fut
     # Fallback direct processing
     return await _embeddings_async(request)
