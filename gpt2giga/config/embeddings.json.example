@@ -1,0 +1,5 @@
+[
+  { "model": "Embeddings", "limit": 8192 },
+  { "model": "EmbeddingsGigaR", "limit": 4096 },
+  { "model": "DEFAULT", "limit": 0 }
+]

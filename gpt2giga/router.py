@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 import tiktoken
 from aioitertools import enumerate as aio_enumerate
 import os
+from pathlib import Path
 import time
 from fastapi import APIRouter
 from fastapi import Request
@@ -17,6 +18,69 @@ from gpt2giga.utils import exceptions_handler
 from openai.types.responses import ResponseTextDeltaEvent
 
 router = APIRouter()
+def _load_embeddings_config(app) -> dict:
+    cfg = getattr(app.state, "embeddings_config", None)
+    if cfg is not None:
+        return cfg
+    # Resolve config path: env override or default to project config/embeddings.json
+    env_path = os.getenv("GPT2GIGA_EMBEDDINGS_CONFIG_FILE", "").strip()
+    if env_path:
+        path = Path(env_path)
+    else:
+        path = (Path(__file__).resolve().parent.parent / "config" / "embeddings.json")
+    try:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+        else:
+            raw = {}
+    except Exception:
+        raw = {}
+
+    # Normalize array format -> map {MODEL: limit}
+    cfg_map: dict[str, int] = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                name = item.get("model")
+                limit = item.get("limit")
+                if name and isinstance(limit, int):
+                    cfg_map[name.upper()] = int(limit)
+    elif isinstance(raw, dict):
+        src = raw.get("limits") if isinstance(raw.get("limits"), dict) else raw
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, int):
+                    cfg_map[str(k).upper()] = int(v)
+
+    app.state.embeddings_config = cfg_map
+    return cfg_map
+
+
+def _get_token_limit_for_model(app, model_name: str) -> int:
+    cfg = _load_embeddings_config(app)
+    if not isinstance(cfg, dict):
+        return 0
+    if not model_name:
+        return int(cfg.get("DEFAULT", 0) or 0)
+    key = model_name.upper()
+    if key in cfg:
+        return int(cfg[key])
+    norm = "".join(ch if ch.isalnum() else "_" for ch in model_name).upper()
+    return int(cfg.get(norm, 0) or 0)
+
+def _aggregate_vectors(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    length = len(vectors[0])
+    sums = [0.0] * length
+    for vec in vectors:
+        # handle mismatched lengths conservatively
+        l = min(length, len(vec))
+        for i in range(l):
+            sums[i] += float(vec[i])
+    count = float(len(vectors))
+    return [sums[i] / count for i in range(length)]
 
 
 @router.get("/health", response_class=Response)
@@ -279,11 +343,46 @@ async def embeddings(request: Request):
     else:
         new_inputs = [inputs]
 
-    embeddings = await request.app.state.client.aembeddings(
-        texts=new_inputs, model=request.app.state.config.proxy_settings.embeddings
-    )
+    # Apply per-model limits: chunk inputs to max tokens per model, then aggregate
+    limit = _get_token_limit_for_model(request.app, gpt_model)
+    if not limit or limit <= 0:
+        return await request.app.state.client.aembeddings(
+            texts=new_inputs, model=request.app.state.config.proxy_settings.embeddings
+        )
 
-    return embeddings
+    enc = tiktoken.encoding_for_model(gpt_model)
+    per_input_chunks: list[list[str]] = []
+    flat_chunks: list[str] = []
+    for text in new_inputs:
+        ids = enc.encode(text)
+        if len(ids) <= limit:
+            chunks = [text]
+        else:
+            chunks = []
+            for i in range(0, len(ids), limit):
+                chunk_ids = ids[i : i + limit]
+                chunks.append(enc.decode(chunk_ids))
+        per_input_chunks.append(chunks)
+        flat_chunks.extend(chunks)
+
+    chunk_resp = await request.app.state.client.aembeddings(
+        texts=flat_chunks, model=request.app.state.config.proxy_settings.embeddings
+    )
+    vectors = [row.get("embedding", []) for row in chunk_resp.get("data", [])]
+
+    result_data = []
+    cursor = 0
+    for idx, chunks in enumerate(per_input_chunks):
+        n = len(chunks)
+        sub = vectors[cursor : cursor + n]
+        cursor += n
+        merged = _aggregate_vectors(sub)
+        result_data.append({"embedding": merged, "index": idx})
+
+    return {"data": result_data, "model": chunk_resp.get("model")}
+
+
+ 
 
 
  
