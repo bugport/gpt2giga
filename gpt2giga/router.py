@@ -22,6 +22,7 @@ from openai.types import Model as OpenAIModel
 from gpt2giga.utils import exceptions_handler
 from gpt2giga.auth import TokenAwareClient
 from openai.types.responses import ResponseTextDeltaEvent
+import uuid
 
 router = APIRouter()
 def _load_embeddings_config(app) -> dict:
@@ -329,6 +330,10 @@ async def get_model(model: str, request: Request):
 @router.post("/chat/completions")
 @exceptions_handler
 async def chat_completions(request: Request):
+    try:
+        request.app.state.last_activity = asyncio.get_event_loop().time()
+    except Exception:
+        pass
     data = await request.json()
     # Debug-log POST body
     try:
@@ -669,6 +674,10 @@ async def metrics(request: Request):
 @router.post("/embeddings")
 @exceptions_handler
 async def embeddings(request: Request):
+    try:
+        request.app.state.last_activity = asyncio.get_event_loop().time()
+    except Exception:
+        pass
     return await _embeddings_async(request)
 
 

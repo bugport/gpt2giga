@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import os
 import httpx
+import asyncio
 import json
 from pathlib import Path
 
@@ -126,6 +127,32 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Initialize idle watcher state
+    app.state.last_activity = app.state.last_activity if hasattr(app.state, "last_activity") else 0.0
+    async def _idle_watcher(app):
+        try:
+            warn_ms = int(os.getenv("IDLE_WARN_MS", "30000") or 30000)
+            tick_ms = int(os.getenv("IDLE_CHECK_MS", "5000") or 5000)
+        except Exception:
+            warn_ms, tick_ms = 30000, 5000
+        while True:
+            try:
+                now = asyncio.get_event_loop().time()
+                app.state.last_idle_ms = 0
+                if getattr(app.state, "last_activity", 0) > 0:
+                    idle_ms = int((now - app.state.last_activity) * 1000.0)
+                    app.state.last_idle_ms = idle_ms
+                    logger = getattr(app.state, "logger", None)
+                    if idle_ms >= warn_ms and logger:
+                        logger.info("Idle for %d ms", idle_ms)
+                await asyncio.sleep(max(0.001, tick_ms / 1000.0))
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(1.0)
+
+    watcher_task = asyncio.create_task(_idle_watcher(app))
+
     yield
 
     # Save adaptivity and timeout state on shutdown
@@ -154,6 +181,12 @@ async def lifespan(app: FastAPI):
         http_client = getattr(app.state, "http_client", None)
         if http_client:
             await http_client.aclose()
+    except Exception:
+        pass
+
+    # Stop idle watcher
+    try:
+        watcher_task.cancel()
     except Exception:
         pass
 
