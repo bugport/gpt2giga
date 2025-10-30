@@ -9,6 +9,8 @@ from pathlib import Path
 import time
 import asyncio
 import random
+import base64
+import struct
 from fastapi import APIRouter
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
@@ -164,6 +166,25 @@ def _aggregate_vectors(vectors: list[list[float]]) -> list[float]:
             sums[i] += float(vec[i])
     count = float(len(vectors))
     return [sums[i] / count for i in range(length)]
+
+
+def _encode_embedding_base64(vec: list[float], urlsafe: bool = False) -> str:
+    if not vec:
+        return ""
+    try:
+        packed = struct.pack("<%sf" % len(vec), *[float(x) for x in vec])
+    except Exception:
+        # fallback: try best-effort cast
+        casted = []
+        for x in vec:
+            try:
+                casted.append(float(x))
+            except Exception:
+                casted.append(0.0)
+        packed = struct.pack("<%sf" % len(casted), *casted)
+    if urlsafe:
+        return base64.urlsafe_b64encode(packed).decode("ascii")
+    return base64.b64encode(packed).decode("ascii")
 
 
 @router.get("/health", response_class=Response)
@@ -423,6 +444,9 @@ async def embeddings(request: Request):
     except Exception:
         pass
     inputs = data.get("input", [])
+    emb_format = (data.get("encoding_format") or "").lower().strip()
+    use_b64 = emb_format in ("base64", "base64url")
+    urlsafe = emb_format == "base64url"
     gpt_model = data.get("model", None)
 
     if isinstance(inputs, list):
@@ -443,9 +467,25 @@ async def embeddings(request: Request):
     # Apply per-model limits: chunk inputs to max tokens per model, then aggregate
     limit = _get_token_limit_for_model(request.app, gpt_model)
     if not limit or limit <= 0:
-        return await _call_embeddings_with_retry(
+        resp = await _call_embeddings_with_retry(
             request.app, new_inputs, request.app.state.config.proxy_settings.embeddings
         )
+        if use_b64 and isinstance(resp, dict) and isinstance(resp.get("data"), list):
+            out = {"data": [], "model": resp.get("model")}
+            for item in resp["data"]:
+                vec = item.get("embedding", [])
+                b64 = _encode_embedding_base64(vec, urlsafe=urlsafe)
+                out["data"].append(
+                    {
+                        "embedding_b64": b64,
+                        "embedding_dtype": "float32",
+                        "embedding_len": len(vec),
+                        "index": item.get("index", 0),
+                        "encoding": "base64url" if urlsafe else "base64",
+                    }
+                )
+            return out
+        return resp
 
     enc = tiktoken.encoding_for_model(gpt_model)
     per_input_chunks: list[list[str]] = []
@@ -474,7 +514,19 @@ async def embeddings(request: Request):
         sub = vectors[cursor : cursor + n]
         cursor += n
         merged = _aggregate_vectors(sub)
-        result_data.append({"embedding": merged, "index": idx})
+        if use_b64:
+            b64 = _encode_embedding_base64(merged, urlsafe=urlsafe)
+            result_data.append(
+                {
+                    "embedding_b64": b64,
+                    "embedding_dtype": "float32",
+                    "embedding_len": len(merged),
+                    "index": idx,
+                    "encoding": "base64url" if urlsafe else "base64",
+                }
+            )
+        else:
+            result_data.append({"embedding": merged, "index": idx})
 
     return {"data": result_data, "model": chunk_resp.get("model")}
 
