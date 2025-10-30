@@ -70,14 +70,20 @@ async def lifespan(app: FastAPI):
             max_conns = int(os.getenv("GPT2GIGA_POOL_MAX_CONNECTIONS", "100") or 100)
             max_keep = int(os.getenv("GPT2GIGA_POOL_MAX_KEEPALIVE", "20") or 20)
             keepalive_ms = int(os.getenv("GPT2GIGA_POOL_KEEPALIVE_TIMEOUT_MS", "60000") or 60000)
+            keepalive_expiry_ms = int(os.getenv("GPT2GIGA_POOL_KEEPALIVE_EXPIRY_MS", "5000") or 5000)
         except Exception:
-            max_conns, max_keep, keepalive_ms = 100, 20, 60000
+            max_conns, max_keep, keepalive_ms, keepalive_expiry_ms = 100, 20, 60000, 5000
 
         limits = httpx.Limits(max_connections=max_conns, max_keepalive_connections=max_keep)
-        timeout = httpx.Timeout(60.0)
+        timeout = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=None)
+        transport = httpx.AsyncHTTPTransport(
+            retries=0,
+            limits=limits,
+            keepalive_expiry=max(0.001, keepalive_expiry_ms / 1000.0),
+        )
         return httpx.AsyncClient(
             http2=http2,
-            limits=limits,
+            transport=transport,
             timeout=timeout,
             headers={"Connection": "keep-alive"},
         )

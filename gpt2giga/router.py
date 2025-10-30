@@ -146,6 +146,11 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 app.state.client.aembeddings(texts=texts, model=model),
                 timeout=timeout_ms / 1000.0,
             )
+            # Success: update metrics
+            try:
+                metrics["emb_success"] = metrics.get("emb_success", 0) + 1
+            except Exception:
+                pass
             # Success: update median-based stability and success counter
             if adaptive_on:
                 elapsed = (time.monotonic() - t0) * 1000.0
@@ -194,17 +199,18 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             # Optionally drop and rebuild client to force socket close
             try:
                 if os.getenv("GPT2GIGA_CLOSE_SOCKET_ON_TIMEOUT", "false").lower() == "true":
-                    # Close pooled http client if present
+                    # Close pooled http client in background and swap immediately
                     http_client = getattr(app.state, "http_client", None)
                     if http_client:
                         try:
-                            await http_client.aclose()
+                            asyncio.create_task(http_client.aclose())
                         except Exception:
                             pass
                         # Rebuild pooled client
                         build_http = getattr(app.state, "build_http_client", None)
                         if build_http:
                             app.state.http_client = build_http()
+                            setattr(app.state, "_force_conn_close", True)
                     # Rebuild GigaChat client wrapper
                     build = getattr(app.state, "build_client", None)
                     tman = getattr(app.state, "token_manager", None)
@@ -650,6 +656,7 @@ async def metrics(request: Request):
             pass
     lines.append(f"emb_total {total}")
     lines.append(f"emb_timeouts {timeouts}")
+    lines.append(f"emb_success {int(m.get('emb_success', 0) or 0)}")
     lines.append(f"emb_throttles {throttles}")
     lines.append(f"emb_retries {retries}")
     lines.append(f"pool_rebuilds {rebuilds}")
