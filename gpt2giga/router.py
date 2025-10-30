@@ -71,41 +71,85 @@ def _get_token_limit_for_model(app, model_name: str) -> int:
     norm = "".join(ch if ch.isalnum() else "_" for ch in model_name).upper()
     return int(cfg.get(norm, 0) or 0)
 
+def _get_rate_state(app):
+    state = getattr(app.state, "_emb_rate", None)
+    if state is None:
+        state = {
+            "delay_ms": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_MIN_MS", "0") or 0),
+            "min_ms": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_MIN_MS", "0") or 0),
+            "max_ms": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_MAX_MS", "1000") or 1000),
+            "backoff": float(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_BACKOFF_FACTOR", "2") or 2),
+            "success_window": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_SUCCESS_WINDOW", "10") or 10),
+            "drop_after": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_DROP_TO_AVG_AFTER", "10") or 10),
+            "success_count": 0,
+            "stable_avg_ms": 0.0,
+            "ema_alpha": 0.2,
+        }
+        app.state._emb_rate = state
+    return state
+
+
 async def _call_embeddings_with_retry(app, texts: list[str], model: str):
     """Call embeddings with adaptive retries on throttling (429/503).
+    Also adapts pacing delay and stabilizes to last average when no rejects occur.
     Controls via env:
       - GPT2GIGA_EMBEDDINGS_MAX_RETRIES (default 3)
       - GPT2GIGA_EMBEDDINGS_BACKOFF_BASE_MS (default 200)
       - GPT2GIGA_EMBEDDINGS_BACKOFF_MAX_MS (default 5000)
+      - GPT2GIGA_EMBEDDINGS_RATE_* knobs (see _get_rate_state)
     """
     max_retries = int(os.getenv("GPT2GIGA_EMBEDDINGS_MAX_RETRIES", "3") or 3)
     base_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_BACKOFF_BASE_MS", "200") or 200)
     max_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_BACKOFF_MAX_MS", "5000") or 5000)
+    rate = _get_rate_state(app)
 
     for attempt in range(max_retries + 1):
+        # Respect current pacing delay
+        if rate["delay_ms"] > 0:
+            await asyncio.sleep(rate["delay_ms"] / 1000.0)
         try:
-            return await app.state.client.aembeddings(texts=texts, model=model)
+            t0 = time.monotonic()
+            result = await app.state.client.aembeddings(texts=texts, model=model)
+            # Success: update stable average and success counter
+            elapsed = (time.monotonic() - t0) * 1000.0
+            # EMA towards observed per-call duration as a proxy for stable throughput
+            if rate["stable_avg_ms"] <= 0:
+                rate["stable_avg_ms"] = elapsed
+            else:
+                rate["stable_avg_ms"] = (
+                    rate["ema_alpha"] * elapsed + (1 - rate["ema_alpha"]) * rate["stable_avg_ms"]
+                )
+            rate["success_count"] = min(rate["success_window"], rate["success_count"] + 1)
+            # After sustained success, decrease delay to last stable average (bounded)
+            if rate["success_count"] >= rate["drop_after"] and rate["delay_ms"] > rate["stable_avg_ms"]:
+                rate["delay_ms"] = max(rate["min_ms"], int(rate["stable_avg_ms"]))
+            return result
         except Exception as e:
             # Try to detect throttling/status
             status = None
             try:
                 import gigachat  # type: ignore
-
                 if isinstance(e, gigachat.exceptions.ResponseError) and len(e.args) == 4:
                     _, status_code, _, _ = e.args
                     status = int(status_code)
             except Exception:
                 pass
 
-            if status in (429, 503) and attempt < max_retries:
-                # exponential backoff with jitter
-                delay_ms = min(max_ms, base_ms * (2 ** attempt))
-                jitter_ms = random.randint(0, delay_ms // 2)
-                await asyncio.sleep((delay_ms + jitter_ms) / 1000.0)
-                continue
+            if status in (429, 503):
+                # Increase delay on throttling (bounded). Reset successes.
+                rate["success_count"] = 0
+                boosted = int(max(rate["min_ms"], max(rate["delay_ms"], rate["min_ms"]) * rate["backoff"]))
+                rate["delay_ms"] = min(rate["max_ms"], boosted)
+                if attempt < max_retries:
+                    # exponential backoff with jitter for immediate retry
+                    delay_ms = min(max_ms, base_ms * (2 ** attempt))
+                    jitter_ms = random.randint(0, delay_ms // 2)
+                    await asyncio.sleep((delay_ms + jitter_ms) / 1000.0)
+                    continue
+            # Non-throttle or retries exhausted
             raise
 
-    # Fallback (should not reach)
+    # Fallback
     return await app.state.client.aembeddings(texts=texts, model=model)
 
 def _aggregate_vectors(vectors: list[list[float]]) -> list[float]:
