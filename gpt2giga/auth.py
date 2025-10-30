@@ -29,6 +29,8 @@ class TokenManager:
         self.grant_type = grant_type
         self.scope = scope
         self.timeout = timeout
+        # When True, bypass TLS verification for token fetch
+        self.insecure = False
         self._token: Optional[str] = None
         self._exp: float = 0.0
 
@@ -58,7 +60,11 @@ class TokenManager:
         if self.scope:
             data["scope"] = self.scope
         resp = httpx.post(
-            self.token_url, data=data, headers=headers, timeout=self.timeout
+            self.token_url,
+            data=data,
+            headers=headers,
+            timeout=self.timeout,
+            verify=not self.insecure,
         )
         resp.raise_for_status()
         payload = resp.json()

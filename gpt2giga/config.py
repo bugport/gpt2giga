@@ -46,6 +46,10 @@ class ProxySettings(BaseSettings):
     auth_scope: Optional[str] = Field(
         default=None, description="Optional OAuth2 scope for token request"
     )
+    auth_insecure: bool = Field(
+        default=False,
+        description="Disable TLS verification for token fetch (insecure)",
+    )
 
     class Config:
         env_prefix = "gpt2giga_"

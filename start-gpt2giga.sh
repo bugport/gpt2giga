@@ -22,6 +22,8 @@ CLI_CERT_FILE=""
 CLI_KEY_FILE=""
 CLI_KEY_FILE_PASSWORD=""
 CLI_CA_BUNDLE_FILE=""
+CLI_NO_VERIFY_SSL_CERTS=""
+CLI_AUTH_INSECURE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       CLI_BASE_URL="${2:-}"; shift 2;;
     --verify-ssl-certs)
       CLI_VERIFY_SSL_CERTS="true"; shift;;
+    --no-verify-ssl-certs)
+      CLI_NO_VERIFY_SSL_CERTS="true"; shift;;
+    --auth-insecure)
+      CLI_AUTH_INSECURE="true"; shift;;
     --mtls)
       CLI_MTLS="true"; shift;;
     --cert-file)
@@ -71,6 +77,17 @@ if [ -f "$ENV_FILE" ]; then
   # Export non-comment lines KEY=VALUE from .env
   # shellcheck disable=SC2046
   export $(grep -v '^#' "$ENV_FILE" | sed -e '/^$/d')
+fi
+
+# If forcing no verification, override env and clear global cert envs
+if [[ -n "$CLI_NO_VERIFY_SSL_CERTS" ]]; then
+  export GIGACHAT_VERIFY_SSL_CERTS=False
+  unset SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE || true
+fi
+
+# If auth insecure requested, inform server via env var (picked by ProxySettings)
+if [[ -n "$CLI_AUTH_INSECURE" ]]; then
+  export GPT2GIGA_AUTH_INSECURE=True
 fi
 
 # Resolve proxy host/port with sensible defaults (CLI overrides)
@@ -121,7 +138,7 @@ if [ -n "${CLI_BASE_URL:-${GIGACHAT_BASE_URL:-}}" ]; then
 fi
 
 # Backend TLS verification toggle
-if [[ "${CLI_VERIFY_SSL_CERTS:-${GIGACHAT_VERIFY_SSL_CERTS:-}}" == "True" || "${CLI_VERIFY_SSL_CERTS:-${GIGACHAT_VERIFY_SSL_CERTS:-}}" == "true" ]]; then
+if [[ -z "$CLI_NO_VERIFY_SSL_CERTS" && ( "${CLI_VERIFY_SSL_CERTS:-${GIGACHAT_VERIFY_SSL_CERTS:-}}" == "True" || "${CLI_VERIFY_SSL_CERTS:-${GIGACHAT_VERIFY_SSL_CERTS:-}}" == "true" ) ]]; then
   ARGS+=(--gigachat-verify-ssl-certs)
 fi
 

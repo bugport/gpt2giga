@@ -36,6 +36,9 @@ async def lifespan(app: FastAPI):
         grant_type=getattr(ps, "auth_grant_type", "client_credentials"),
         scope=getattr(ps, "auth_scope", None),
     )
+    # Insecure token fetch if requested
+    if getattr(ps, "auth_insecure", False):
+        token_manager.insecure = True
 
     # If configured, acquire token and inject into gigachat settings
     if token_manager.is_configured():
