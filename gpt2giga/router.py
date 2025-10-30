@@ -112,6 +112,55 @@ def _get_metrics_state(app):
     return state
 
 
+async def _ensure_emb_queue(app):
+    if getattr(app.state, "_embq_inited", False):
+        return
+    try:
+        enabled = os.getenv("GPT2GIGA_EMB_QUEUE_ENABLED", "true").lower() == "true"
+        if not enabled:
+            app.state._embq_inited = True
+            return
+        size = int(os.getenv("GPT2GIGA_EMB_QUEUE_SIZE", "100") or 100)
+        workers = int(os.getenv("GPT2GIGA_EMB_WORKERS", "2") or 2)
+        rps = float(os.getenv("GPT2GIGA_EMB_RATE_RPS", "0") or 0)
+        app.state._emb_queue = asyncio.Queue(maxsize=max(1, size))
+        app.state._emb_rate_rps = max(0.0, rps)
+        app.state._emb_next_time = 0.0
+
+        async def worker_loop(idx: int):
+            while True:
+                try:
+                    request, fut = await app.state._emb_queue.get()
+                    try:
+                        # simple token-bucket: sleep to enforce RPS
+                        rps_local = float(getattr(app.state, "_emb_rate_rps", 0.0) or 0.0)
+                        if rps_local > 0:
+                            interval = 1.0 / rps_local
+                            now = asyncio.get_event_loop().time()
+                            next_t = max(now, getattr(app.state, "_emb_next_time", 0.0))
+                            delay = max(0.0, next_t - now)
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                            app.state._emb_next_time = (asyncio.get_event_loop().time()) + interval
+                        result = await _embeddings_async(request)
+                        if not fut.cancelled():
+                            fut.set_result(result)
+                    except Exception as e:
+                        if not fut.cancelled():
+                            fut.set_exception(e)
+                    finally:
+                        app.state._emb_queue.task_done()
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    await asyncio.sleep(0.1)
+
+        app.state._emb_workers = [asyncio.create_task(worker_loop(i)) for i in range(workers)]
+        app.state._embq_inited = True
+    except Exception:
+        app.state._embq_inited = True
+
+
 async def _call_embeddings_with_retry(app, texts: list[str], model: str):
     """Call embeddings with adaptive retries on throttling (429/503).
     Also adapts pacing delay and stabilizes to last average when no rejects occur.
@@ -350,6 +399,9 @@ async def get_model(model: str, request: Request):
 async def chat_completions(request: Request):
     try:
         request.app.state.last_activity = asyncio.get_event_loop().time()
+        # Reset pool restart tracking on new activity
+        if hasattr(request.app.state, "_pool_restart_idle_ms"):
+            request.app.state._pool_restart_idle_ms = 0
     except Exception:
         pass
     data = await request.json()
@@ -694,8 +746,21 @@ async def metrics(request: Request):
 async def embeddings(request: Request):
     try:
         request.app.state.last_activity = asyncio.get_event_loop().time()
+        # Reset pool restart tracking on new activity
+        if hasattr(request.app.state, "_pool_restart_idle_ms"):
+            request.app.state._pool_restart_idle_ms = 0
     except Exception:
         pass
+    # If queueing enabled, enqueue and await result
+    await _ensure_emb_queue(request.app)
+    if hasattr(request.app.state, "_emb_queue"):
+        q: asyncio.Queue = request.app.state._emb_queue
+        if q.full():
+            return Response(status_code=429, content=json.dumps({"error": "queue_full"}), media_type="application/json")
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        await q.put((request, fut))
+        return await fut
+    # Fallback direct processing
     return await _embeddings_async(request)
 
 

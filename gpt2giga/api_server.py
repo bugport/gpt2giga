@@ -129,12 +129,14 @@ async def lifespan(app: FastAPI):
 
     # Initialize idle watcher state
     app.state.last_activity = app.state.last_activity if hasattr(app.state, "last_activity") else 0.0
+    app.state._pool_restart_idle_ms = 0  # Track when we last restarted pool
     async def _idle_watcher(app):
         try:
             warn_ms = int(os.getenv("IDLE_WARN_MS", "30000") or 30000)
             tick_ms = int(os.getenv("IDLE_CHECK_MS", "5000") or 5000)
+            close_pool_ms = int(os.getenv("IDLE_CLOSE_POOL_MS", "60000") or 60000)
         except Exception:
-            warn_ms, tick_ms = 30000, 5000
+            warn_ms, tick_ms, close_pool_ms = 30000, 5000, 60000
         while True:
             try:
                 now = asyncio.get_event_loop().time()
@@ -145,6 +147,38 @@ async def lifespan(app: FastAPI):
                     logger = getattr(app.state, "logger", None)
                     if idle_ms >= warn_ms and logger:
                         logger.info("Idle for %d ms", idle_ms)
+                    # Close and restart pool when idle threshold exceeded
+                    if idle_ms >= close_pool_ms:
+                        last_restart = getattr(app.state, "_pool_restart_idle_ms", 0)
+                        # Only restart once per idle period
+                        if idle_ms - last_restart >= close_pool_ms:
+                            try:
+                                if logger:
+                                    logger.info("Idle timeout %d ms: closing connections and restarting pool", idle_ms)
+                                # Close HTTP client
+                                http_client = getattr(app.state, "http_client", None)
+                                if http_client:
+                                    try:
+                                        await http_client.aclose()
+                                    except Exception:
+                                        pass
+                                # Rebuild HTTP client
+                                build_http = getattr(app.state, "build_http_client", None)
+                                if build_http:
+                                    app.state.http_client = build_http()
+                                # Rebuild GigaChat client wrapper
+                                build = getattr(app.state, "build_client", None)
+                                tman = getattr(app.state, "token_manager", None)
+                                if build and tman:
+                                    new_gc = build()
+                                    app.state.gigachat_client = new_gc
+                                    app.state.client = TokenAwareClient(tman, build, new_gc)
+                                app.state._pool_restart_idle_ms = idle_ms
+                                if logger:
+                                    logger.info("Pool restarted after idle timeout")
+                            except Exception as e:
+                                if logger:
+                                    logger.warning("Failed to restart pool on idle timeout: %s", e)
                 await asyncio.sleep(max(0.001, tick_ms / 1000.0))
             except asyncio.CancelledError:
                 break
