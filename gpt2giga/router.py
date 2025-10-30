@@ -145,9 +145,10 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 rate["samples"] = samples
                 rate["stable_med_ms"] = median
                 rate["success_count"] = min(rate["success_window"], rate["success_count"] + 1)
-                # After sustained success, decrease delay to last stable median (bounded)
+                # After sustained success, set delay to 2 × median (halve frequency)
                 if rate["success_count"] >= rate["drop_after"] and rate["delay_ms"] > rate.get("stable_med_ms", 0):
-                    rate["delay_ms"] = max(rate["min_ms"], int(rate.get("stable_med_ms", 0)))
+                    target = int((rate.get("stable_med_ms", 0) or 0) * 2)
+                    rate["delay_ms"] = max(rate["min_ms"], target)
             return result
         except asyncio.TimeoutError:
             timeouts += 1
