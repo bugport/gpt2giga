@@ -11,6 +11,7 @@ import asyncio
 import random
 import base64
 import struct
+import statistics
 from fastapi import APIRouter
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
@@ -94,6 +95,22 @@ def _get_rate_state(app):
     return state
 
 
+def _get_metrics_state(app):
+    state = getattr(app.state, "_metrics", None)
+    if state is None:
+        state = {
+            "emb_total": 0,
+            "emb_timeouts": 0,
+            "emb_throttles": 0,
+            "emb_retries": 0,
+            "pool_rebuilds": 0,
+            "durations_ms": [],
+            "max_samples": 200,
+        }
+        app.state._metrics = state
+    return state
+
+
 async def _call_embeddings_with_retry(app, texts: list[str], model: str):
     """Call embeddings with adaptive retries on throttling (429/503).
     Also adapts pacing delay and stabilizes to last average when no rejects occur.
@@ -115,6 +132,7 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
     t_max_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_TIMEOUT_MAX_MS", "60000") or 60000)
     timeout_max_retries = int(os.getenv("GPT2GIGA_EMBEDDINGS_TIMEOUT_MAX_RETRIES", "0") or 0)  # 0=infinite
     timeouts = 0
+    metrics = _get_metrics_state(app)
 
     for attempt in range(max_retries + 1):
         # Respect current pacing delay
@@ -131,6 +149,16 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             # Success: update median-based stability and success counter
             if adaptive_on:
                 elapsed = (time.monotonic() - t0) * 1000.0
+                # metrics: track duration
+                try:
+                    durations = metrics.get("durations_ms", [])
+                    durations.append(elapsed)
+                    if len(durations) > metrics.get("max_samples", 200):
+                        durations[:] = durations[-metrics.get("max_samples", 200):]
+                    metrics["durations_ms"] = durations
+                    metrics["emb_total"] = metrics.get("emb_total", 0) + 1
+                except Exception:
+                    pass
                 samples = rate.get("samples", [])
                 max_s = int(rate.get("max_samples", 21) or 21)
                 samples.append(elapsed)
@@ -160,6 +188,7 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                         timeout_ms,
                         timeouts,
                     )
+                metrics["emb_timeouts"] = metrics.get("emb_timeouts", 0) + 1
             except Exception:
                 pass
             # Optionally drop and rebuild client to force socket close
@@ -183,6 +212,7 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                         new_gc = build()
                         app.state.gigachat_client = new_gc
                         app.state.client = TokenAwareClient(tman, build, new_gc)
+                    metrics["pool_rebuilds"] = metrics.get("pool_rebuilds", 0) + 1
             except Exception:
                 pass
             if timeout_max_retries == 0 or timeouts <= timeout_max_retries:
@@ -209,6 +239,11 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                     delay_ms = min(max_ms, base_ms * (2 ** attempt))
                     jitter_ms = random.randint(0, delay_ms // 2)
                     await asyncio.sleep((delay_ms + jitter_ms) / 1000.0)
+                    try:
+                        metrics["emb_throttles"] = metrics.get("emb_throttles", 0) + 1
+                        metrics["emb_retries"] = metrics.get("emb_retries", 0) + 1
+                    except Exception:
+                        pass
                     continue
             # Non-throttle or retries exhausted
             raise
@@ -589,6 +624,39 @@ async def _embeddings_async(request: Request):
             result_data.append({"embedding": merged, "index": idx})
 
     return {"data": result_data, "model": chunk_resp.get("model")}
+
+
+@router.get("/metrics")
+async def metrics(request: Request):
+    """Expose simple text metrics."""
+    m = _get_metrics_state(request.app)
+    lines = []
+    total = int(m.get("emb_total", 0) or 0)
+    timeouts = int(m.get("emb_timeouts", 0) or 0)
+    throttles = int(m.get("emb_throttles", 0) or 0)
+    retries = int(m.get("emb_retries", 0) or 0)
+    rebuilds = int(m.get("pool_rebuilds", 0) or 0)
+    durs = list(m.get("durations_ms", []) or [])
+    p50 = p95 = p99 = 0.0
+    if durs:
+        try:
+            d_sorted = sorted(durs)
+            p50 = statistics.median(d_sorted)
+            idx95 = max(0, int(0.95 * (len(d_sorted) - 1)))
+            idx99 = max(0, int(0.99 * (len(d_sorted) - 1)))
+            p95 = float(d_sorted[idx95])
+            p99 = float(d_sorted[idx99])
+        except Exception:
+            pass
+    lines.append(f"emb_total {total}")
+    lines.append(f"emb_timeouts {timeouts}")
+    lines.append(f"emb_throttles {throttles}")
+    lines.append(f"emb_retries {retries}")
+    lines.append(f"pool_rebuilds {rebuilds}")
+    lines.append(f"emb_p50_ms {p50:.3f}")
+    lines.append(f"emb_p95_ms {p95:.3f}")
+    lines.append(f"emb_p99_ms {p99:.3f}")
+    return Response("\n".join(lines) + "\n", media_type="text/plain")
 
 
 @router.post("/embeddings")
