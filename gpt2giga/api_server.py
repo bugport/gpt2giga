@@ -58,6 +58,10 @@ async def lifespan(app: FastAPI):
                 config.gigachat_settings.access_token = token
         return GigaChat(**config.gigachat_settings.dict())
 
+    # Expose client factory and token manager for runtime rebuilds
+    app.state.build_client = build_client
+    app.state.token_manager = token_manager
+
     app.state.gigachat_client = build_client()
     app.state.client = TokenAwareClient(token_manager, build_client, app.state.gigachat_client)
 

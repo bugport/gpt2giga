@@ -19,6 +19,7 @@ from openai.pagination import AsyncPage
 from openai.types import Model as OpenAIModel
 
 from gpt2giga.utils import exceptions_handler
+from gpt2giga.auth import TokenAwareClient
 from openai.types.responses import ResponseTextDeltaEvent
 
 router = APIRouter()
@@ -150,6 +151,17 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             return result
         except asyncio.TimeoutError:
             timeouts += 1
+            # Optionally drop and rebuild client to force socket close
+            try:
+                if os.getenv("GPT2GIGA_CLOSE_SOCKET_ON_TIMEOUT", "false").lower() == "true":
+                    build = getattr(app.state, "build_client", None)
+                    tman = getattr(app.state, "token_manager", None)
+                    if build and tman:
+                        new_gc = build()
+                        app.state.gigachat_client = new_gc
+                        app.state.client = TokenAwareClient(tman, build, new_gc)
+            except Exception:
+                pass
             if timeout_max_retries == 0 or timeouts <= timeout_max_retries:
                 continue
             raise
