@@ -108,13 +108,25 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
     rate = _get_rate_state(app)
     adaptive_on = str(os.getenv("GPT2GIGA_EMBEDDINGS_ADAPTIVE", "true")).lower() == "true"
 
+    # Timeout controls based on median * factor
+    t_factor = float(os.getenv("GPT2GIGA_EMBEDDINGS_TIMEOUT_FACTOR", "2") or 2)
+    t_min_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_TIMEOUT_MIN_MS", "1000") or 1000)
+    t_max_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_TIMEOUT_MAX_MS", "60000") or 60000)
+    timeout_max_retries = int(os.getenv("GPT2GIGA_EMBEDDINGS_TIMEOUT_MAX_RETRIES", "0") or 0)  # 0=infinite
+    timeouts = 0
+
     for attempt in range(max_retries + 1):
         # Respect current pacing delay
         if rate["delay_ms"] > 0:
             await asyncio.sleep(rate["delay_ms"] / 1000.0)
         try:
             t0 = time.monotonic()
-            result = await app.state.client.aembeddings(texts=texts, model=model)
+            stable_med = float(rate.get("stable_med_ms", 0.0) or 0.0)
+            timeout_ms = max(t_min_ms, min(t_max_ms, int(stable_med * t_factor) if stable_med > 0 else t_min_ms))
+            result = await asyncio.wait_for(
+                app.state.client.aembeddings(texts=texts, model=model),
+                timeout=timeout_ms / 1000.0,
+            )
             # Success: update median-based stability and success counter
             if adaptive_on:
                 elapsed = (time.monotonic() - t0) * 1000.0
@@ -136,6 +148,11 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 if rate["success_count"] >= rate["drop_after"] and rate["delay_ms"] > rate.get("stable_med_ms", 0):
                     rate["delay_ms"] = max(rate["min_ms"], int(rate.get("stable_med_ms", 0)))
             return result
+        except asyncio.TimeoutError:
+            timeouts += 1
+            if timeout_max_retries == 0 or timeouts <= timeout_max_retries:
+                continue
+            raise
         except Exception as e:
             # Try to detect throttling/status
             status = None

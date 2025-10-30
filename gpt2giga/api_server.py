@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+import json
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -63,7 +65,7 @@ async def lifespan(app: FastAPI):
     app.state.request_transformer = RequestTransformer(config, attachment_processor)
     app.state.response_processor = ResponseProcessor()
 
-    # Load adaptivity state if present
+    # Load adaptivity and timeout state if present
     try:
         cfg_dir = Path(__file__).resolve().parent / "config"
         cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -73,12 +75,25 @@ async def lifespan(app: FastAPI):
                 state = json.load(f)
             if isinstance(state, dict):
                 app.state._emb_rate = state
+        # Load timeout state (e.g., stable median)
+        timeout_path = cfg_dir / "timeout.json"
+        if timeout_path.exists():
+            with timeout_path.open("r", encoding="utf-8") as f:
+                tout = json.load(f)
+            if isinstance(tout, dict):
+                # merge into emb_rate for shared median use
+                rate = getattr(app.state, "_emb_rate", {}) or {}
+                sm = tout.get("stable_med_ms")
+                if isinstance(sm, (int, float)):
+                    rate.setdefault("samples", [])
+                    rate["stable_med_ms"] = float(sm)
+                    app.state._emb_rate = rate
     except Exception:
         pass
 
     yield
 
-    # Save adaptivity state on shutdown
+    # Save adaptivity and timeout state on shutdown
     try:
         rate = getattr(app.state, "_emb_rate", None)
         if isinstance(rate, dict):
@@ -89,6 +104,13 @@ async def lifespan(app: FastAPI):
             with tmp.open("w", encoding="utf-8") as f:
                 json.dump(rate, f, ensure_ascii=False, indent=2)
             tmp.replace(adapt_path)
+            # timeout.json: persist a minimal subset
+            timeout_path = cfg_dir / "timeout.json"
+            tout_tmp = timeout_path.with_suffix(".tmp")
+            payload = {"stable_med_ms": float(rate.get("stable_med_ms", 0.0) or 0.0)}
+            with tout_tmp.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            tout_tmp.replace(timeout_path)
     except Exception:
         pass
 
