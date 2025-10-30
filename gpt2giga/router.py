@@ -151,9 +151,31 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             return result
         except asyncio.TimeoutError:
             timeouts += 1
+            try:
+                logger = getattr(app.state, "logger", None)
+                if logger:
+                    logger.info(
+                        "Embeddings request timed out after %d ms (timeouts=%d)",
+                        timeout_ms,
+                        timeouts,
+                    )
+            except Exception:
+                pass
             # Optionally drop and rebuild client to force socket close
             try:
                 if os.getenv("GPT2GIGA_CLOSE_SOCKET_ON_TIMEOUT", "false").lower() == "true":
+                    # Close pooled http client if present
+                    http_client = getattr(app.state, "http_client", None)
+                    if http_client:
+                        try:
+                            await http_client.aclose()
+                        except Exception:
+                            pass
+                        # Rebuild pooled client
+                        build_http = getattr(app.state, "build_http_client", None)
+                        if build_http:
+                            app.state.http_client = build_http()
+                    # Rebuild GigaChat client wrapper
                     build = getattr(app.state, "build_client", None)
                     tman = getattr(app.state, "token_manager", None)
                     if build and tman:

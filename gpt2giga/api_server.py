@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
+import os
+import httpx
 import json
 from pathlib import Path
 
@@ -58,9 +60,34 @@ async def lifespan(app: FastAPI):
                 config.gigachat_settings.access_token = token
         return GigaChat(**config.gigachat_settings.dict())
 
-    # Expose client factory and token manager for runtime rebuilds
+    # Shared upstream HTTP client (connection pooling)
+    def build_http_client():
+        try:
+            http2 = str(os.getenv("GPT2GIGA_HTTP2", "true")).lower() == "true"
+        except Exception:
+            http2 = True
+        try:
+            max_conns = int(os.getenv("GPT2GIGA_POOL_MAX_CONNECTIONS", "100") or 100)
+            max_keep = int(os.getenv("GPT2GIGA_POOL_MAX_KEEPALIVE", "20") or 20)
+            keepalive_ms = int(os.getenv("GPT2GIGA_POOL_KEEPALIVE_TIMEOUT_MS", "60000") or 60000)
+        except Exception:
+            max_conns, max_keep, keepalive_ms = 100, 20, 60000
+
+        limits = httpx.Limits(max_connections=max_conns, max_keepalive_connections=max_keep)
+        timeout = httpx.Timeout(60.0)
+        return httpx.AsyncClient(
+            http2=http2,
+            limits=limits,
+            timeout=timeout,
+            headers={"Connection": "keep-alive"},
+        )
+
+    app.state.http_client = build_http_client()
+
+    # Expose client factories and token manager for runtime rebuilds
     app.state.build_client = build_client
     app.state.token_manager = token_manager
+    app.state.build_http_client = build_http_client
 
     app.state.gigachat_client = build_client()
     app.state.client = TokenAwareClient(token_manager, build_client, app.state.gigachat_client)
@@ -115,6 +142,14 @@ async def lifespan(app: FastAPI):
             with tout_tmp.open("w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             tout_tmp.replace(timeout_path)
+    except Exception:
+        pass
+
+    # Close pooled http client
+    try:
+        http_client = getattr(app.state, "http_client", None)
+        if http_client:
+            await http_client.aclose()
     except Exception:
         pass
 
