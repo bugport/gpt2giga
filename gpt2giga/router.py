@@ -36,7 +36,7 @@ async def ping() -> Response:
 @router.get("/models")
 @exceptions_handler
 async def show_available_models(raw_request: Request):
-    response = await raw_request.app.state.gigachat_client.aget_models()
+    response = await raw_request.app.state.client.aget_models()
     models = [i.dict(by_alias=True) for i in response.data]
     current_timestamp = int(time.time())
     for model in models:
@@ -49,7 +49,7 @@ async def show_available_models(raw_request: Request):
 @router.get("/models/{model}")
 @exceptions_handler
 async def get_model(model: str, request: Request):
-    response = await request.app.state.gigachat_client.aget_model(model=model)
+    response = await request.app.state.client.aget_model(model=model)
     model = response.dict(by_alias=True)
     model["created"] = int(time.time())
     return OpenAIModel(**model)
@@ -81,7 +81,7 @@ async def chat_completions(request: Request):
             data["functions"].append(giga_function)
     chat_messages = request.app.state.request_transformer.send_to_gigachat(data)
     if not stream:
-        response = await request.app.state.gigachat_client.achat(chat_messages)
+        response = await request.app.state.client.achat(chat_messages)
         if is_response_api:
             processed = request.app.state.response_processor.process_response_api(
                 data, response, chat_messages.model, is_tool_call
@@ -114,7 +114,7 @@ async def chat_completions(request: Request):
                 last_flush = time.monotonic()
                 last_seq = 0
                 async for i, chunk in aio_enumerate(
-                    request.app.state.gigachat_client.astream(chat_messages)
+                    request.app.state.client.astream(chat_messages)
                 ):
                     processed = request.app.state.response_processor.process_stream_chunk_response(
                         chunk, sequence_number=i
@@ -187,7 +187,7 @@ async def chat_completions(request: Request):
             else:
                 buf = []
                 last_flush = time.monotonic()
-                async for chunk in request.app.state.gigachat_client.astream(
+                async for chunk in request.app.state.client.astream(
                     chat_messages
                 ):
                     processed = (
@@ -279,7 +279,7 @@ async def embeddings(request: Request):
     else:
         new_inputs = [inputs]
 
-    embeddings = await request.app.state.gigachat_client.aembeddings(
+    embeddings = await request.app.state.client.aembeddings(
         texts=new_inputs, model=request.app.state.config.proxy_settings.embeddings
     )
 

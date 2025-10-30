@@ -11,6 +11,7 @@ from gpt2giga.logger import init_logger
 from gpt2giga.middleware import PathNormalizationMiddleware
 from gpt2giga.protocol import AttachmentProcessor, RequestTransformer, ResponseProcessor
 from gpt2giga.router import router
+from gpt2giga.auth import TokenManager, TokenAwareClient
 
 
 @asynccontextmanager
@@ -27,7 +28,31 @@ async def lifespan(app: FastAPI):
 
     app.state.config = config
     app.state.logger = logger
-    app.state.gigachat_client = GigaChat(**config.gigachat_settings.dict())
+    # Optional token manager
+    ps = config.proxy_settings
+    token_manager = TokenManager(
+        token_url=getattr(ps, "auth_token_url", None),
+        basic_b64=getattr(ps, "auth_basic_b64", None),
+        grant_type=getattr(ps, "auth_grant_type", "client_credentials"),
+        scope=getattr(ps, "auth_scope", None),
+    )
+
+    # If configured, acquire token and inject into gigachat settings
+    if token_manager.is_configured():
+        token = token_manager.get_token()
+        if token:
+            config.gigachat_settings.access_token = token
+
+    def build_client():
+        # Refresh token on each client build to ensure validity
+        if token_manager.is_configured():
+            token = token_manager.get_token()
+            if token:
+                config.gigachat_settings.access_token = token
+        return GigaChat(**config.gigachat_settings.dict())
+
+    app.state.gigachat_client = build_client()
+    app.state.client = TokenAwareClient(token_manager, build_client, app.state.gigachat_client)
 
     attachment_processor = AttachmentProcessor(app.state.gigachat_client)
     app.state.request_transformer = RequestTransformer(config, attachment_processor)
