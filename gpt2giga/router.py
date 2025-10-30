@@ -106,6 +106,7 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
     base_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_BACKOFF_BASE_MS", "200") or 200)
     max_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_BACKOFF_MAX_MS", "5000") or 5000)
     rate = _get_rate_state(app)
+    adaptive_on = str(os.getenv("GPT2GIGA_EMBEDDINGS_ADAPTIVE", "true")).lower() == "true"
 
     for attempt in range(max_retries + 1):
         # Respect current pacing delay
