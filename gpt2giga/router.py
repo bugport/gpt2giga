@@ -593,9 +593,8 @@ async def _embeddings_async(request: Request):
 
 @router.post("/embeddings")
 @exceptions_handler
-def embeddings(request: Request):
-    # Run the async implementation in a dedicated event loop (sync endpoint)
-    return asyncio.run(_embeddings_async(request))
+async def embeddings(request: Request):
+    return await _embeddings_async(request)
 
 
  
