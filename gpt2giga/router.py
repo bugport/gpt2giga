@@ -84,8 +84,10 @@ def _get_rate_state(app):
             "success_window": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_SUCCESS_WINDOW", "10") or 10),
             "drop_after": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_DROP_TO_AVG_AFTER", "10") or 10),
             "success_count": 0,
-            "stable_avg_ms": 0.0,
-            "ema_alpha": 0.2,
+            # Switch to median-based stability reference
+            "stable_med_ms": 0.0,
+            "samples": [],
+            "max_samples": int(os.getenv("GPT2GIGA_EMBEDDINGS_RATE_MEDIAN_SAMPLES", "21") or 21),
         }
         app.state._emb_rate = state
     return state
@@ -112,19 +114,26 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
         try:
             t0 = time.monotonic()
             result = await app.state.client.aembeddings(texts=texts, model=model)
-            # Success: update stable average and success counter
-            elapsed = (time.monotonic() - t0) * 1000.0
-            # EMA towards observed per-call duration as a proxy for stable throughput
-            if rate["stable_avg_ms"] <= 0:
-                rate["stable_avg_ms"] = elapsed
-            else:
-                rate["stable_avg_ms"] = (
-                    rate["ema_alpha"] * elapsed + (1 - rate["ema_alpha"]) * rate["stable_avg_ms"]
-                )
-            rate["success_count"] = min(rate["success_window"], rate["success_count"] + 1)
-            # After sustained success, decrease delay to last stable average (bounded)
-            if rate["success_count"] >= rate["drop_after"] and rate["delay_ms"] > rate["stable_avg_ms"]:
-                rate["delay_ms"] = max(rate["min_ms"], int(rate["stable_avg_ms"]))
+            # Success: update median-based stability and success counter
+            if adaptive_on:
+                elapsed = (time.monotonic() - t0) * 1000.0
+                samples = rate.get("samples", [])
+                max_s = int(rate.get("max_samples", 21) or 21)
+                samples.append(elapsed)
+                if len(samples) > max_s:
+                    samples = samples[-max_s:]
+                sorted_s = sorted(samples)
+                mid = len(sorted_s) // 2
+                if len(sorted_s) % 2 == 1:
+                    median = sorted_s[mid]
+                else:
+                    median = 0.5 * (sorted_s[mid - 1] + sorted_s[mid])
+                rate["samples"] = samples
+                rate["stable_med_ms"] = median
+                rate["success_count"] = min(rate["success_window"], rate["success_count"] + 1)
+                # After sustained success, decrease delay to last stable median (bounded)
+                if rate["success_count"] >= rate["drop_after"] and rate["delay_ms"] > rate.get("stable_med_ms", 0):
+                    rate["delay_ms"] = max(rate["min_ms"], int(rate.get("stable_med_ms", 0)))
             return result
         except Exception as e:
             # Try to detect throttling/status
