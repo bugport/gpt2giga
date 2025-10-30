@@ -494,9 +494,7 @@ async def chat_completions(request: Request):
  
 
 
-@router.post("/embeddings")
-@exceptions_handler
-async def embeddings(request: Request):
+async def _embeddings_async(request: Request):
     data = await request.json()
     # Debug-log POST body
     try:
@@ -591,6 +589,13 @@ async def embeddings(request: Request):
             result_data.append({"embedding": merged, "index": idx})
 
     return {"data": result_data, "model": chunk_resp.get("model")}
+
+
+@router.post("/embeddings")
+@exceptions_handler
+def embeddings(request: Request):
+    # Run the async implementation in a dedicated event loop (sync endpoint)
+    return asyncio.run(_embeddings_async(request))
 
 
  
