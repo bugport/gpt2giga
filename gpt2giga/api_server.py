@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import json
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -60,7 +62,35 @@ async def lifespan(app: FastAPI):
     attachment_processor = AttachmentProcessor(app.state.gigachat_client)
     app.state.request_transformer = RequestTransformer(config, attachment_processor)
     app.state.response_processor = ResponseProcessor()
+
+    # Load adaptivity state if present
+    try:
+        cfg_dir = Path(__file__).resolve().parent / "config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        adapt_path = cfg_dir / "adaptivity.json"
+        if adapt_path.exists():
+            with adapt_path.open("r", encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, dict):
+                app.state._emb_rate = state
+    except Exception:
+        pass
+
     yield
+
+    # Save adaptivity state on shutdown
+    try:
+        rate = getattr(app.state, "_emb_rate", None)
+        if isinstance(rate, dict):
+            cfg_dir = Path(__file__).resolve().parent / "config"
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            adapt_path = cfg_dir / "adaptivity.json"
+            tmp = adapt_path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(rate, f, ensure_ascii=False, indent=2)
+            tmp.replace(adapt_path)
+    except Exception:
+        pass
 
 
 def create_app() -> FastAPI:
