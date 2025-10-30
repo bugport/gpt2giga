@@ -143,10 +143,14 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             t0 = time.monotonic()
             stable_med = float(rate.get("stable_med_ms", 0.0) or 0.0)
             timeout_ms = max(t_min_ms, min(t_max_ms, int(stable_med * t_factor) if stable_med > 0 else t_min_ms))
-            result = await asyncio.wait_for(
-                app.state.client.aembeddings(texts=texts, model=model),
-                timeout=timeout_ms / 1000.0,
-            )
+            # request-id span
+            req_id = str(uuid.uuid4())
+            logger = getattr(app.state, "logger", None)
+            if logger:
+                logger.debug(
+                    "emb span start id=%s timeout_ms=%d texts=%d", req_id, timeout_ms, len(texts)
+                )
+            result = await asyncio.wait_for(app.state.client.aembeddings(texts=texts, model=model), timeout=timeout_ms / 1000.0)
             # Success: update metrics
             try:
                 metrics["emb_success"] = metrics.get("emb_success", 0) + 1
@@ -183,6 +187,20 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 if rate["success_count"] >= rate["drop_after"] and rate["delay_ms"] > rate.get("stable_med_ms", 0):
                     target = int((rate.get("stable_med_ms", 0) or 0) * 2)
                     rate["delay_ms"] = max(rate["min_ms"], target)
+            if logger:
+                total_ms = (time.monotonic() - t0) * 1000.0
+                logger.debug("emb span end id=%s total_ms=%.3f upstream_ms=%.3f", req_id, total_ms, elapsed)
+            # slow logs
+            try:
+                slow_total = int(os.getenv("SLOW_EMB_TOTAL_MS", "2000") or 2000)
+                slow_up = int(os.getenv("SLOW_EMB_UPSTREAM_MS", "1500") or 1500)
+                if total_ms >= slow_total or elapsed >= slow_up:
+                    if logger:
+                        logger.warning(
+                            "slow emb id=%s total_ms=%.3f upstream_ms=%.3f texts=%d", req_id, total_ms, elapsed, len(texts)
+                        )
+            except Exception:
+                pass
             return result
         except asyncio.TimeoutError:
             timeouts += 1
