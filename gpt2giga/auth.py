@@ -111,7 +111,7 @@ class TokenAwareClient:
     async def achat(self, chat):
         return await self._retry(lambda c: c.achat(chat))
 
-    async def astream(self, chat):
+    def astream(self, chat):
         async def gen():
             try:
                 async for chunk in self._client.astream(chat):
