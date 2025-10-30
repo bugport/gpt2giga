@@ -7,6 +7,8 @@ from aioitertools import enumerate as aio_enumerate
 import os
 from pathlib import Path
 import time
+import asyncio
+import random
 from fastapi import APIRouter
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
@@ -69,6 +71,43 @@ def _get_token_limit_for_model(app, model_name: str) -> int:
     norm = "".join(ch if ch.isalnum() else "_" for ch in model_name).upper()
     return int(cfg.get(norm, 0) or 0)
 
+async def _call_embeddings_with_retry(app, texts: list[str], model: str):
+    """Call embeddings with adaptive retries on throttling (429/503).
+    Controls via env:
+      - GPT2GIGA_EMBEDDINGS_MAX_RETRIES (default 3)
+      - GPT2GIGA_EMBEDDINGS_BACKOFF_BASE_MS (default 200)
+      - GPT2GIGA_EMBEDDINGS_BACKOFF_MAX_MS (default 5000)
+    """
+    max_retries = int(os.getenv("GPT2GIGA_EMBEDDINGS_MAX_RETRIES", "3") or 3)
+    base_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_BACKOFF_BASE_MS", "200") or 200)
+    max_ms = int(os.getenv("GPT2GIGA_EMBEDDINGS_BACKOFF_MAX_MS", "5000") or 5000)
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await app.state.client.aembeddings(texts=texts, model=model)
+        except Exception as e:
+            # Try to detect throttling/status
+            status = None
+            try:
+                import gigachat  # type: ignore
+
+                if isinstance(e, gigachat.exceptions.ResponseError) and len(e.args) == 4:
+                    _, status_code, _, _ = e.args
+                    status = int(status_code)
+            except Exception:
+                pass
+
+            if status in (429, 503) and attempt < max_retries:
+                # exponential backoff with jitter
+                delay_ms = min(max_ms, base_ms * (2 ** attempt))
+                jitter_ms = random.randint(0, delay_ms // 2)
+                await asyncio.sleep((delay_ms + jitter_ms) / 1000.0)
+                continue
+            raise
+
+    # Fallback (should not reach)
+    return await app.state.client.aembeddings(texts=texts, model=model)
+
 def _aggregate_vectors(vectors: list[list[float]]) -> list[float]:
     if not vectors:
         return []
@@ -123,6 +162,13 @@ async def get_model(model: str, request: Request):
 @exceptions_handler
 async def chat_completions(request: Request):
     data = await request.json()
+    # Debug-log POST body
+    try:
+        logger = getattr(request.app.state, "logger", None)
+        if logger and logger.isEnabledFor(10):  # DEBUG
+            logger.debug("POST /chat/completions body: %s", json.dumps(data))
+    except Exception:
+        pass
     stream = data.get("stream", False)
     is_tool_call = "tools" in data
     is_response_api = "input" in data
@@ -325,6 +371,13 @@ async def chat_completions(request: Request):
 @exceptions_handler
 async def embeddings(request: Request):
     data = await request.json()
+    # Debug-log POST body
+    try:
+        logger = getattr(request.app.state, "logger", None)
+        if logger and logger.isEnabledFor(10):  # DEBUG
+            logger.debug("POST /embeddings body: %s", json.dumps(data))
+    except Exception:
+        pass
     inputs = data.get("input", [])
     gpt_model = data.get("model", None)
 
@@ -346,8 +399,8 @@ async def embeddings(request: Request):
     # Apply per-model limits: chunk inputs to max tokens per model, then aggregate
     limit = _get_token_limit_for_model(request.app, gpt_model)
     if not limit or limit <= 0:
-        return await request.app.state.client.aembeddings(
-            texts=new_inputs, model=request.app.state.config.proxy_settings.embeddings
+        return await _call_embeddings_with_retry(
+            request.app, new_inputs, request.app.state.config.proxy_settings.embeddings
         )
 
     enc = tiktoken.encoding_for_model(gpt_model)
@@ -365,8 +418,8 @@ async def embeddings(request: Request):
         per_input_chunks.append(chunks)
         flat_chunks.extend(chunks)
 
-    chunk_resp = await request.app.state.client.aembeddings(
-        texts=flat_chunks, model=request.app.state.config.proxy_settings.embeddings
+    chunk_resp = await _call_embeddings_with_retry(
+        request.app, flat_chunks, request.app.state.config.proxy_settings.embeddings
     )
     vectors = [row.get("embedding", []) for row in chunk_resp.get("data", [])]
 
