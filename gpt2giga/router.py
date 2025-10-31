@@ -221,6 +221,19 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                     "emb span start id=%s timeout_ms=%d texts=%d", req_id, timeout_ms, len(texts)
                 )
             result = await asyncio.wait_for(client.aembeddings(texts=texts, model=model), timeout=timeout_ms / 1000.0)
+            # Normalize response: convert Pydantic model to dict if needed
+            if not isinstance(result, dict):
+                try:
+                    # Try Pydantic v1 style (.dict())
+                    if hasattr(result, "dict"):
+                        result = result.dict()
+                    # Try Pydantic v2 style (.model_dump())
+                    elif hasattr(result, "model_dump"):
+                        result = result.model_dump()
+                except Exception as e:
+                    logger = getattr(app.state, "logger", None)
+                    if logger:
+                        logger.warning("Failed to convert embeddings response to dict: %s (type=%s, error=%s)", result, type(result).__name__, str(e))
             # Success: update metrics
             elapsed = (time.monotonic() - t0) * 1000.0
             try:
@@ -347,7 +360,21 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
 
     # Fallback - use embeddings-specific client
     client = getattr(app.state, "client_embeddings", app.state.client)
-    return await client.aembeddings(texts=texts, model=model)
+    result = await client.aembeddings(texts=texts, model=model)
+    # Normalize response: convert Pydantic model to dict if needed
+    if not isinstance(result, dict):
+        try:
+            # Try Pydantic v1 style (.dict())
+            if hasattr(result, "dict"):
+                result = result.dict()
+            # Try Pydantic v2 style (.model_dump())
+            elif hasattr(result, "model_dump"):
+                result = result.model_dump()
+        except Exception as e:
+            logger = getattr(app.state, "logger", None)
+            if logger:
+                logger.warning("Failed to convert embeddings response to dict: %s (type=%s, error=%s)", result, type(result).__name__, str(e))
+    return result
 
 def _aggregate_vectors(vectors: list[list[float]]) -> list[float]:
     if not vectors:
