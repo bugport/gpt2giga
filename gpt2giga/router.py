@@ -561,6 +561,11 @@ async def chat_completions(request: Request):
             else:
                 buf = []
                 last_flush = time.monotonic()
+                # Generate consistent stream identifiers per OpenAI spec
+                stream_id = f"chatcmpl-{uuid.uuid4()}"
+                stream_fingerprint = f"fp_{uuid.uuid4()}"
+                stream_created = int(time.time())
+                
                 async for chunk in request.app.state.client.astream(
                     chat_messages
                 ):
@@ -569,6 +574,9 @@ async def chat_completions(request: Request):
                             chunk,
                             chat_messages.model,
                             is_tool_call="tools" in chat_messages,
+                            stream_id=stream_id,
+                            stream_fingerprint=stream_fingerprint,
+                            stream_created=stream_created,
                         )
                     )
                     content = (
@@ -593,9 +601,31 @@ async def chat_completions(request: Request):
 
                     # If no coalescing requested -> pass through
                     if max_bytes == 0 and max_interval_ms == 0:
-                        yield f"data: {json.dumps(processed)}\n\n"
+                        # Remove usage from non-final chunks per OpenAI spec
+                        chunk_to_yield = processed.copy()
+                        is_final_passthrough = any(
+                            choice.get("finish_reason") is not None 
+                            for choice in processed.get("choices", [])
+                        ) or "usage" in processed
+                        if not is_final_passthrough and "usage" in chunk_to_yield:
+                            del chunk_to_yield["usage"]
+                        yield f"data: {json.dumps(chunk_to_yield)}\n\n"
                         continue
 
+                    # Check if this is the final chunk (has finish_reason or usage)
+                    is_final = any(
+                        choice.get("finish_reason") is not None 
+                        for choice in processed.get("choices", [])
+                    ) or "usage" in processed
+                    
+                    # If this is the final chunk, flush buffer and emit it
+                    if is_final:
+                        merged_out = flush_buffer_nonresp()
+                        if merged_out:
+                            yield f"data: {json.dumps(merged_out)}\n\n"
+                        yield f"data: {json.dumps(processed)}\n\n"
+                        continue
+                    
                     # If this chunk carries tool_calls etc., flush buffer and emit as-is
                     delta_obj = processed.get("choices", [{}])[0].get("delta", {})
                     if any(k in delta_obj for k in ("tool_calls", "function_call")):
@@ -620,6 +650,12 @@ async def chat_completions(request: Request):
                         merged_out = flush_buffer_nonresp()
                         if merged_out:
                             yield f"data: {json.dumps(merged_out)}\n\n"
+                    # Yield chunk without usage (will be in final chunk per OpenAI spec)
+                    # Remove usage from non-final chunks
+                    chunk_to_yield = processed.copy()
+                    if "usage" in chunk_to_yield:
+                        del chunk_to_yield["usage"]
+                    yield f"data: {json.dumps(chunk_to_yield)}\n\n"
 
             yield "data: [DONE]\n\n"
 

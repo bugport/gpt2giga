@@ -418,7 +418,8 @@ class ResponseProcessor:
             ]
 
     def process_stream_chunk(
-        self, giga_resp: ChatCompletionChunk, gpt_model: str, is_tool_call: bool = False
+        self, giga_resp: ChatCompletionChunk, gpt_model: str, is_tool_call: bool = False,
+        stream_id: str = None, stream_fingerprint: str = None, stream_created: int = None
     ) -> dict:
         """Обрабатывает стриминговый чанк от GigaChat"""
         giga_dict = giga_resp.dict()
@@ -426,15 +427,31 @@ class ResponseProcessor:
         for choice in giga_dict["choices"]:
             self._process_choice(choice, is_tool_call, is_stream=True)
 
+        # Use consistent stream identifiers per OpenAI spec
+        chunk_id = stream_id if stream_id else f"chatcmpl-{uuid.uuid4()}"
+        fingerprint = stream_fingerprint if stream_fingerprint else f"fp_{uuid.uuid4()}"
+        created = stream_created if stream_created else int(time.time())
+        
+        # Check if this is the final chunk (has finish_reason set)
+        is_final_chunk = any(
+            choice.get("finish_reason") is not None 
+            for choice in giga_dict.get("choices", [])
+        )
+        
         result = {
-            "id": f"chatcmpl-{uuid.uuid4()}",
+            "id": chunk_id,
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": created,
             "model": gpt_model,
             "choices": giga_dict["choices"],
-            "usage": self._build_usage(giga_dict.get("usage")),
-            "system_fingerprint": f"fp_{uuid.uuid4()}",
+            "system_fingerprint": fingerprint,
         }
+        
+        # Per OpenAI spec: usage should only appear in the final chunk
+        if is_final_chunk:
+            usage = self._build_usage(giga_dict.get("usage"))
+            if usage:
+                result["usage"] = usage
 
         self.logger.debug(f"Processed stream chunk: {result}")
         return result
