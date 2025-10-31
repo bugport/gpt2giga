@@ -687,61 +687,194 @@ async def _embeddings_async(request: Request):
     urlsafe = emb_format == "base64url"
     gpt_model = data.get("model", None)
 
+    # Validate inputs
+    if not inputs:
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": {"message": "input is required and cannot be empty", "type": "invalid_request_error"}}),
+            media_type="application/json",
+        )
+    
+    # Validate model
+    if not gpt_model:
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": {"message": "model is required", "type": "invalid_request_error"}}),
+            media_type="application/json",
+        )
+
+    # Process inputs
     if isinstance(inputs, list):
+        if not inputs:  # Empty list
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": {"message": "input array cannot be empty", "type": "invalid_request_error"}}),
+                media_type="application/json",
+            )
         new_inputs = []
-        if isinstance(inputs[0], int):  # List[int]:
-            new_inputs = tiktoken.encoding_for_model(gpt_model).decode(inputs)
-        else:
-            for row in inputs:
-                if isinstance(row, list):  # List[List[int]]
-                    new_inputs.append(
-                        tiktoken.encoding_for_model(gpt_model).decode(row)
-                    )
-                else:
+        try:
+            # Check if first element is int (token IDs) or list[int]
+            if isinstance(inputs[0], int):
+                # Single token ID sequence - decode to single string
+                new_inputs = [tiktoken.encoding_for_model(gpt_model).decode(inputs)]
+            elif isinstance(inputs[0], list) and inputs[0] and isinstance(inputs[0][0], int):
+                # List of token ID sequences - decode each
+                enc = tiktoken.encoding_for_model(gpt_model)
+                for row in inputs:
+                    if isinstance(row, list) and all(isinstance(x, int) for x in row):
+                        new_inputs.append(enc.decode(row))
+                    else:
+                        return Response(
+                            status_code=400,
+                            content=json.dumps({"error": {"message": "invalid input format: expected string array or token ID arrays", "type": "invalid_request_error"}}),
+                            media_type="application/json",
+                        )
+            else:
+                # List of strings - pass through
+                for row in inputs:
+                    if not isinstance(row, str):
+                        return Response(
+                            status_code=400,
+                            content=json.dumps({"error": {"message": "invalid input format: expected string array", "type": "invalid_request_error"}}),
+                            media_type="application/json",
+                        )
+                    # Allow empty strings - backend will handle them
                     new_inputs.append(row)
+        except Exception as e:
+            logger = getattr(request.app.state, "logger", None)
+            if logger:
+                logger.warning("Error processing input format: %s", str(e))
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": {"message": f"invalid input format: {str(e)}", "type": "invalid_request_error"}}),
+                media_type="application/json",
+            )
     else:
+        # Single input - convert to list
+        if not isinstance(inputs, str):
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": {"message": "input must be a string or array of strings", "type": "invalid_request_error"}}),
+                media_type="application/json",
+            )
         new_inputs = [inputs]
 
     # Apply per-model limits: chunk inputs to max tokens per model, then aggregate
-    limit = _get_token_limit_for_model(request.app, gpt_model)
+    try:
+        limit = _get_token_limit_for_model(request.app, gpt_model)
+    except Exception as e:
+        logger = getattr(request.app.state, "logger", None)
+        if logger:
+            logger.warning("Error getting token limit for model %s: %s", gpt_model, str(e))
+        limit = 0  # Fallback: no limit
+    
     if not limit or limit <= 0:
         resp = await _call_embeddings_with_retry(
             request.app, new_inputs, request.app.state.config.proxy_settings.embeddings
         )
-        if use_b64 and isinstance(resp, dict) and isinstance(resp.get("data"), list):
-            out = {"data": [], "model": resp.get("model")}
-            for item in resp["data"]:
+        # Validate response
+        if not isinstance(resp, dict):
+            logger = getattr(request.app.state, "logger", None)
+            if logger:
+                logger.error("Invalid response format from embeddings backend: %s", type(resp))
+            return Response(
+                status_code=500,
+                content=json.dumps({"error": {"message": "invalid response from embeddings service", "type": "internal_error"}}),
+                media_type="application/json",
+            )
+        resp_data = resp.get("data")
+        if not isinstance(resp_data, list) or len(resp_data) != len(new_inputs):
+            logger = getattr(request.app.state, "logger", None)
+            if logger:
+                logger.error("Response data mismatch: expected %d items, got %d", len(new_inputs), len(resp_data) if isinstance(resp_data, list) else 0)
+            return Response(
+                status_code=500,
+                content=json.dumps({"error": {"message": f"response data mismatch: expected {len(new_inputs)} items", "type": "internal_error"}}),
+                media_type="application/json",
+            )
+        if use_b64:
+            out = {"data": [], "model": resp.get("model", gpt_model)}
+            for item in resp_data:
                 vec = item.get("embedding", [])
+                if not vec or not isinstance(vec, list):
+                    logger = getattr(request.app.state, "logger", None)
+                    if logger:
+                        logger.error("Invalid embedding vector in response: %s", type(vec))
+                    return Response(
+                        status_code=500,
+                        content=json.dumps({"error": {"message": "invalid embedding vector in response", "type": "internal_error"}}),
+                        media_type="application/json",
+                    )
                 b64 = _encode_embedding_base64(vec, urlsafe=urlsafe)
                 # Match OpenAI format: base64 string in "embedding" field, not "embedding_b64"
                 out["data"].append(
                     {
                         "embedding": b64,
-                        "index": item.get("index", 0),
+                        "index": item.get("index", len(out["data"])),
                     }
                 )
             return out
         return resp
 
-    enc = tiktoken.encoding_for_model(gpt_model)
+    try:
+        enc = tiktoken.encoding_for_model(gpt_model)
+    except Exception as e:
+        logger = getattr(request.app.state, "logger", None)
+        if logger:
+            logger.warning("Error getting encoding for model %s: %s", gpt_model, str(e))
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": {"message": f"invalid model or encoding error: {str(e)}", "type": "invalid_request_error"}}),
+            media_type="application/json",
+        )
+    
     per_input_chunks: list[list[str]] = []
     flat_chunks: list[str] = []
-    for text in new_inputs:
-        ids = enc.encode(text)
-        if len(ids) <= limit:
-            chunks = [text]
-        else:
-            chunks = []
-            for i in range(0, len(ids), limit):
-                chunk_ids = ids[i : i + limit]
-                chunks.append(enc.decode(chunk_ids))
-        per_input_chunks.append(chunks)
-        flat_chunks.extend(chunks)
+    try:
+        for text in new_inputs:
+            ids = enc.encode(text)
+            if len(ids) <= limit:
+                chunks = [text]
+            else:
+                chunks = []
+                for i in range(0, len(ids), limit):
+                    chunk_ids = ids[i : i + limit]
+                    chunks.append(enc.decode(chunk_ids))
+            per_input_chunks.append(chunks)
+            flat_chunks.extend(chunks)
+    except Exception as e:
+        logger = getattr(request.app.state, "logger", None)
+        if logger:
+            logger.warning("Error encoding/chunking inputs: %s", str(e))
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": {"message": f"error processing inputs: {str(e)}", "type": "invalid_request_error"}}),
+            media_type="application/json",
+        )
 
     chunk_resp = await _call_embeddings_with_retry(
         request.app, flat_chunks, request.app.state.config.proxy_settings.embeddings
     )
+    # Validate chunk response
+    if not isinstance(chunk_resp, dict) or not isinstance(chunk_resp.get("data"), list):
+        logger = getattr(request.app.state, "logger", None)
+        if logger:
+            logger.error("Invalid chunk response format from embeddings backend")
+        return Response(
+            status_code=500,
+            content=json.dumps({"error": {"message": "invalid response from embeddings service", "type": "internal_error"}}),
+            media_type="application/json",
+        )
     vectors = [row.get("embedding", []) for row in chunk_resp.get("data", [])]
+    if len(vectors) != len(flat_chunks):
+        logger = getattr(request.app.state, "logger", None)
+        if logger:
+            logger.error("Chunk response mismatch: expected %d vectors, got %d", len(flat_chunks), len(vectors))
+        return Response(
+            status_code=500,
+            content=json.dumps({"error": {"message": f"response data mismatch: expected {len(flat_chunks)} vectors, got {len(vectors)}", "type": "internal_error"}}),
+            media_type="application/json",
+        )
 
     result_data = []
     cursor = 0
@@ -750,6 +883,15 @@ async def _embeddings_async(request: Request):
         sub = vectors[cursor : cursor + n]
         cursor += n
         merged = _aggregate_vectors(sub)
+        if not merged or len(merged) == 0:
+            logger = getattr(request.app.state, "logger", None)
+            if logger:
+                logger.error("Empty merged vector for input %d (chunks=%d)", idx, n)
+            return Response(
+                status_code=500,
+                content=json.dumps({"error": {"message": f"failed to generate embedding for input {idx}", "type": "internal_error"}}),
+                media_type="application/json",
+            )
         if use_b64:
             b64 = _encode_embedding_base64(merged, urlsafe=urlsafe)
             # Match OpenAI format: base64 string in "embedding" field, not "embedding_b64"
