@@ -672,13 +672,11 @@ async def _embeddings_async(request: Request):
             for item in resp["data"]:
                 vec = item.get("embedding", [])
                 b64 = _encode_embedding_base64(vec, urlsafe=urlsafe)
+                # Match OpenAI format: base64 string in "embedding" field, not "embedding_b64"
                 out["data"].append(
                     {
-                        "embedding_b64": b64,
-                        "embedding_dtype": "float32",
-                        "embedding_len": len(vec),
+                        "embedding": b64,
                         "index": item.get("index", 0),
-                        "encoding": "base64url" if urlsafe else "base64",
                     }
                 )
             return out
@@ -713,13 +711,11 @@ async def _embeddings_async(request: Request):
         merged = _aggregate_vectors(sub)
         if use_b64:
             b64 = _encode_embedding_base64(merged, urlsafe=urlsafe)
+            # Match OpenAI format: base64 string in "embedding" field, not "embedding_b64"
             result_data.append(
                 {
-                    "embedding_b64": b64,
-                    "embedding_dtype": "float32",
-                    "embedding_len": len(merged),
+                    "embedding": b64,
                     "index": idx,
-                    "encoding": "base64url" if urlsafe else "base64",
                 }
             )
         else:
