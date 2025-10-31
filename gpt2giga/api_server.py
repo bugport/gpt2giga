@@ -53,23 +53,32 @@ async def lifespan(app: FastAPI):
         if token:
             config.gigachat_settings.access_token = token
 
-    def build_client():
+    def build_client(endpoint_type: str = "default"):
         # Refresh token on each client build to ensure validity
         if token_manager.is_configured():
             token = token_manager.get_token()
             if token:
                 config.gigachat_settings.access_token = token
+        # Each endpoint gets its own GigaChat client with separate connection pool
         return GigaChat(**config.gigachat_settings.dict())
 
-    # Shared upstream HTTP client (connection pooling)
-    def build_http_client():
+    # Shared upstream HTTP client (connection pooling) - for non-GigaChat direct requests
+    def build_http_client(endpoint_type: str = "default"):
         try:
-            http2 = str(os.getenv("GPT2GIGA_HTTP2", "true")).lower() == "true"
+            http2 = str(os.getenv("GPT2GIGA_HTTP2", "false")).lower() == "true"
         except Exception:
-            http2 = True
+            http2 = False
+        # Endpoint-specific pool settings
         try:
-            max_conns = int(os.getenv("GPT2GIGA_POOL_MAX_CONNECTIONS", "100") or 100)
-            max_keep = int(os.getenv("GPT2GIGA_POOL_MAX_KEEPALIVE", "20") or 20)
+            if endpoint_type == "embeddings":
+                max_conns = int(os.getenv("GPT2GIGA_POOL_EMB_MAX_CONNECTIONS", os.getenv("GPT2GIGA_POOL_MAX_CONNECTIONS", "10") or 10) or 10)
+                max_keep = int(os.getenv("GPT2GIGA_POOL_EMB_MAX_KEEPALIVE", os.getenv("GPT2GIGA_POOL_MAX_KEEPALIVE", "5") or 5) or 5)
+            elif endpoint_type == "chat":
+                max_conns = int(os.getenv("GPT2GIGA_POOL_CHAT_MAX_CONNECTIONS", os.getenv("GPT2GIGA_POOL_MAX_CONNECTIONS", "100") or 100) or 100)
+                max_keep = int(os.getenv("GPT2GIGA_POOL_CHAT_MAX_KEEPALIVE", os.getenv("GPT2GIGA_POOL_MAX_KEEPALIVE", "20") or 20) or 20)
+            else:
+                max_conns = int(os.getenv("GPT2GIGA_POOL_MAX_CONNECTIONS", "100") or 100)
+                max_keep = int(os.getenv("GPT2GIGA_POOL_MAX_KEEPALIVE", "20") or 20)
             keepalive_ms = int(os.getenv("GPT2GIGA_POOL_KEEPALIVE_TIMEOUT_MS", "60000") or 60000)
         except Exception:
             max_conns, max_keep, keepalive_ms = 100, 20, 60000
@@ -87,15 +96,35 @@ async def lifespan(app: FastAPI):
             headers={"Connection": "keep-alive"},
         )
 
-    app.state.http_client = build_http_client()
+    # Separate HTTP clients for different endpoints (if needed for direct requests)
+    app.state.http_client = build_http_client("default")
+    app.state.http_client_chat = build_http_client("chat")
+    app.state.http_client_embeddings = build_http_client("embeddings")
 
     # Expose client factories and token manager for runtime rebuilds
     app.state.build_client = build_client
     app.state.token_manager = token_manager
     app.state.build_http_client = build_http_client
 
-    app.state.gigachat_client = build_client()
-    app.state.client = TokenAwareClient(token_manager, build_client, app.state.gigachat_client)
+    # Separate GigaChat clients for each endpoint (each maintains its own connection pool)
+    app.state.gigachat_client_chat = build_client("chat")
+    app.state.gigachat_client_embeddings = build_client("embeddings")
+    # Default client for backward compatibility (used by /models endpoints)
+    app.state.gigachat_client = app.state.gigachat_client_chat
+    
+    # Separate TokenAwareClient wrappers for each endpoint
+    app.state.client_chat = TokenAwareClient(
+        token_manager, 
+        lambda: build_client("chat"), 
+        app.state.gigachat_client_chat
+    )
+    app.state.client_embeddings = TokenAwareClient(
+        token_manager,
+        lambda: build_client("embeddings"),
+        app.state.gigachat_client_embeddings
+    )
+    # Default client for backward compatibility
+    app.state.client = app.state.client_chat
 
     attachment_processor = AttachmentProcessor(app.state.gigachat_client)
     app.state.request_transformer = RequestTransformer(config, attachment_processor)
@@ -155,24 +184,42 @@ async def lifespan(app: FastAPI):
                             try:
                                 if logger:
                                     logger.info("Idle timeout %d ms: closing connections and restarting pool", idle_ms)
-                                # Close HTTP client
-                                http_client = getattr(app.state, "http_client", None)
-                                if http_client:
-                                    try:
-                                        await http_client.aclose()
-                                    except Exception:
-                                        pass
-                                # Rebuild HTTP client
+                                # Close and rebuild endpoint-specific HTTP clients
                                 build_http = getattr(app.state, "build_http_client", None)
-                                if build_http:
-                                    app.state.http_client = build_http()
-                                # Rebuild GigaChat client wrapper
                                 build = getattr(app.state, "build_client", None)
                                 tman = getattr(app.state, "token_manager", None)
+                                
+                                # Chat client
+                                http_client_chat = getattr(app.state, "http_client_chat", None)
+                                if http_client_chat:
+                                    try:
+                                        await http_client_chat.aclose()
+                                    except Exception:
+                                        pass
+                                if build_http:
+                                    app.state.http_client_chat = build_http("chat")
                                 if build and tman:
-                                    new_gc = build()
-                                    app.state.gigachat_client = new_gc
-                                    app.state.client = TokenAwareClient(tman, build, new_gc)
+                                    new_gc_chat = build("chat")
+                                    app.state.gigachat_client_chat = new_gc_chat
+                                    app.state.client_chat = TokenAwareClient(tman, lambda: build("chat"), new_gc_chat)
+                                
+                                # Embeddings client
+                                http_client_emb = getattr(app.state, "http_client_embeddings", None)
+                                if http_client_emb:
+                                    try:
+                                        await http_client_emb.aclose()
+                                    except Exception:
+                                        pass
+                                if build_http:
+                                    app.state.http_client_embeddings = build_http("embeddings")
+                                if build and tman:
+                                    new_gc_emb = build("embeddings")
+                                    app.state.gigachat_client_embeddings = new_gc_emb
+                                    app.state.client_embeddings = TokenAwareClient(tman, lambda: build("embeddings"), new_gc_emb)
+                                
+                                # Update default client for backward compatibility
+                                app.state.gigachat_client = app.state.gigachat_client_chat
+                                app.state.client = app.state.client_chat
                                 app.state._pool_restart_idle_ms = idle_ms
                                 if logger:
                                     logger.info("Pool restarted after idle timeout")
@@ -210,8 +257,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # Close pooled http client
+    # Close endpoint-specific HTTP clients
     try:
+        http_client_chat = getattr(app.state, "http_client_chat", None)
+        if http_client_chat:
+            await http_client_chat.aclose()
+        http_client_emb = getattr(app.state, "http_client_embeddings", None)
+        if http_client_emb:
+            await http_client_emb.aclose()
+        # Fallback for backward compatibility
         http_client = getattr(app.state, "http_client", None)
         if http_client:
             await http_client.aclose()

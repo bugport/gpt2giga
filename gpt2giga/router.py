@@ -181,6 +181,8 @@ async def _ensure_emb_queue(app):
 
 
 async def _call_embeddings_with_retry(app, texts: list[str], model: str):
+    # Use embeddings-specific client with separate connection pool
+    client = getattr(app.state, "client_embeddings", app.state.client)
     """Call embeddings with adaptive retries on throttling (429/503).
     Also adapts pacing delay and stabilizes to last average when no rejects occur.
     Controls via env:
@@ -218,7 +220,7 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 logger.debug(
                     "emb span start id=%s timeout_ms=%d texts=%d", req_id, timeout_ms, len(texts)
                 )
-            result = await asyncio.wait_for(app.state.client.aembeddings(texts=texts, model=model), timeout=timeout_ms / 1000.0)
+            result = await asyncio.wait_for(client.aembeddings(texts=texts, model=model), timeout=timeout_ms / 1000.0)
             # Success: update metrics
             elapsed = (time.monotonic() - t0) * 1000.0
             try:
@@ -288,25 +290,25 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             # Optionally drop and rebuild client to force socket close
             try:
                 if os.getenv("GPT2GIGA_CLOSE_SOCKET_ON_TIMEOUT", "false").lower() == "true":
-                    # Close pooled http client in background and swap immediately
-                    http_client = getattr(app.state, "http_client", None)
+                    # Close embeddings-specific http client in background and swap immediately
+                    http_client = getattr(app.state, "http_client_embeddings", None)
                     if http_client:
                         try:
                             asyncio.create_task(http_client.aclose())
                         except Exception:
                             pass
-                        # Rebuild pooled client
+                        # Rebuild embeddings-specific pooled client
                         build_http = getattr(app.state, "build_http_client", None)
                         if build_http:
-                            app.state.http_client = build_http()
+                            app.state.http_client_embeddings = build_http("embeddings")
                             setattr(app.state, "_force_conn_close", True)
-                    # Rebuild GigaChat client wrapper
+                    # Rebuild embeddings-specific GigaChat client wrapper
                     build = getattr(app.state, "build_client", None)
                     tman = getattr(app.state, "token_manager", None)
                     if build and tman:
-                        new_gc = build()
-                        app.state.gigachat_client = new_gc
-                        app.state.client = TokenAwareClient(tman, build, new_gc)
+                        new_gc = build("embeddings")
+                        app.state.gigachat_client_embeddings = new_gc
+                        app.state.client_embeddings = TokenAwareClient(tman, lambda: build("embeddings"), new_gc)
                     metrics["pool_rebuilds"] = metrics.get("pool_rebuilds", 0) + 1
             except Exception:
                 pass
@@ -343,8 +345,9 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
             # Non-throttle or retries exhausted
             raise
 
-    # Fallback
-    return await app.state.client.aembeddings(texts=texts, model=model)
+    # Fallback - use embeddings-specific client
+    client = getattr(app.state, "client_embeddings", app.state.client)
+    return await client.aembeddings(texts=texts, model=model)
 
 def _aggregate_vectors(vectors: list[list[float]]) -> list[float]:
     if not vectors:
@@ -454,8 +457,10 @@ async def chat_completions(request: Request):
                 )
             data["functions"].append(giga_function)
     chat_messages = request.app.state.request_transformer.send_to_gigachat(data)
+    # Use chat-specific client with separate connection pool
+    client_chat = getattr(request.app.state, "client_chat", request.app.state.client)
     if not stream:
-        response = await request.app.state.client.achat(chat_messages)
+        response = await client_chat.achat(chat_messages)
         if is_response_api:
             processed = request.app.state.response_processor.process_response_api(
                 data, response, chat_messages.model, is_tool_call
@@ -488,7 +493,7 @@ async def chat_completions(request: Request):
                 last_flush = time.monotonic()
                 last_seq = 0
                 async for i, chunk in aio_enumerate(
-                    request.app.state.client.astream(chat_messages)
+                    client_chat.astream(chat_messages)
                 ):
                     processed = request.app.state.response_processor.process_stream_chunk_response(
                         chunk, sequence_number=i
@@ -566,7 +571,7 @@ async def chat_completions(request: Request):
                 stream_fingerprint = f"fp_{uuid.uuid4()}"
                 stream_created = int(time.time())
                 
-                async for chunk in request.app.state.client.astream(
+                async for chunk in client_chat.astream(
                     chat_messages
                 ):
                     processed = (
