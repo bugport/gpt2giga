@@ -156,6 +156,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Initialize uptime/idle watcher state
+    try:
+        # Monotonic start time for system-wide averages
+        app.state._start_time = asyncio.get_event_loop().time()
+    except Exception:
+        pass
+    
     # Initialize idle watcher state
     app.state.last_activity = app.state.last_activity if hasattr(app.state, "last_activity") else 0.0
     app.state._pool_restart_idle_ms = 0  # Track when we last restarted pool

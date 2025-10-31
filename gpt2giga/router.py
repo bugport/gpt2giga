@@ -207,8 +207,9 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
 
     for attempt in range(max_retries + 1):
         # Respect current pacing delay
-        if rate["delay_ms"] > 0:
-            await asyncio.sleep(rate["delay_ms"] / 1000.0)
+        applied_delay_ms = int(rate.get("delay_ms", 0) or 0)
+        if applied_delay_ms > 0:
+            await asyncio.sleep(applied_delay_ms / 1000.0)
         try:
             t0 = time.monotonic()
             stable_med = float(rate.get("stable_med_ms", 0.0) or 0.0)
@@ -240,6 +241,9 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 metrics["emb_success"] = metrics.get("emb_success", 0) + 1
                 # Track cumulative time for average calculation (always)
                 metrics["emb_total_time_ms"] = metrics.get("emb_total_time_ms", 0.0) + elapsed
+                # Include idle/pacing delay time into wall-clock accumulation
+                wall_ms = float(elapsed) + float(applied_delay_ms)
+                metrics["emb_total_wall_ms"] = metrics.get("emb_total_wall_ms", 0.0) + wall_ms
             except Exception:
                 pass
             # Success: update median-based stability and success counter
@@ -976,6 +980,18 @@ async def metrics(request: Request):
             lines.append(f"emb_avg_ms 0.000")
     except Exception:
         lines.append(f"emb_avg_ms 0.000")
+
+    # Average including idle/pacing delay (in seconds)
+    try:
+        total_wall_ms = float(m.get("emb_total_wall_ms", 0.0) or 0.0)
+        success_count = int(m.get("emb_success", 0) or 0)
+        if success_count > 0:
+            avg_s = (total_wall_ms / float(success_count)) / 1000.0
+            lines.append(f"emb_avg_s {avg_s:.6f}")
+        else:
+            lines.append(f"emb_avg_s 0.000000")
+    except Exception:
+        lines.append(f"emb_avg_s 0.000000")
     # Queue metrics
     lines.append(f"queue_enqueued {int(m.get('queue_enqueued', 0) or 0)}")
     lines.append(f"queue_processed {int(m.get('queue_processed', 0) or 0)}")
@@ -988,6 +1004,20 @@ async def metrics(request: Request):
             lines.append(f"queue_size {int(m.get('queue_size', 0) or 0)}")
     except Exception:
         lines.append(f"queue_size {int(m.get('queue_size', 0) or 0)}")
+    # System-wide average time since start divided by successes
+    try:
+        start_time = getattr(request.app.state, "_start_time", None)
+        success_count = int(m.get("emb_success", 0) or 0)
+        if start_time is not None and success_count > 0:
+            now = asyncio.get_event_loop().time()
+            uptime_s = max(0.0, now - float(start_time))
+            sys_avg_s = uptime_s / float(success_count)
+            lines.append(f"emb_sys_avg_s {sys_avg_s:.6f}")
+        else:
+            lines.append(f"emb_sys_avg_s 0.000000")
+    except Exception:
+        lines.append(f"emb_sys_avg_s 0.000000")
+
     return Response("\n".join(lines) + "\n", media_type="text/plain")
 
 
