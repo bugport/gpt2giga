@@ -107,6 +107,7 @@ def _get_metrics_state(app):
             "pool_rebuilds": 0,
             "durations_ms": [],
             "max_samples": 200,
+            "emb_total_time_ms": 0.0,
             "queue_enqueued": 0,
             "queue_processed": 0,
             "queue_dropped": 0,
@@ -219,13 +220,15 @@ async def _call_embeddings_with_retry(app, texts: list[str], model: str):
                 )
             result = await asyncio.wait_for(app.state.client.aembeddings(texts=texts, model=model), timeout=timeout_ms / 1000.0)
             # Success: update metrics
+            elapsed = (time.monotonic() - t0) * 1000.0
             try:
                 metrics["emb_success"] = metrics.get("emb_success", 0) + 1
+                # Track cumulative time for average calculation (always)
+                metrics["emb_total_time_ms"] = metrics.get("emb_total_time_ms", 0.0) + elapsed
             except Exception:
                 pass
             # Success: update median-based stability and success counter
             if adaptive_on:
-                elapsed = (time.monotonic() - t0) * 1000.0
                 # metrics: track duration
                 try:
                     durations = metrics.get("durations_ms", [])
@@ -756,6 +759,17 @@ async def metrics(request: Request):
     lines.append(f"emb_p50_ms {p50:.3f}")
     lines.append(f"emb_p95_ms {p95:.3f}")
     lines.append(f"emb_p99_ms {p99:.3f}")
+    # Average time per embedding since start
+    try:
+        total_time_ms = float(m.get("emb_total_time_ms", 0.0) or 0.0)
+        success_count = int(m.get("emb_success", 0) or 0)
+        if success_count > 0:
+            avg_ms = total_time_ms / float(success_count)
+            lines.append(f"emb_avg_ms {avg_ms:.3f}")
+        else:
+            lines.append(f"emb_avg_ms 0.000")
+    except Exception:
+        lines.append(f"emb_avg_ms 0.000")
     # Queue metrics
     lines.append(f"queue_enqueued {int(m.get('queue_enqueued', 0) or 0)}")
     lines.append(f"queue_processed {int(m.get('queue_processed', 0) or 0)}")
