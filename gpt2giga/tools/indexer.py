@@ -323,7 +323,15 @@ def index_codebase_cli():
 
     logger.info(f"Indexing codebase: {codebase_path}")
     logger.info(f"Collection: {collection_name}")
-    logger.info(f"gpt2giga URL: {gpt2giga_url}")
+    # Normalize gpt2giga URL to ensure it has a scheme
+    gpt2giga_url_normalized = gpt2giga_url.strip().rstrip("/")
+    if not gpt2giga_url_normalized.startswith(("http://", "https://")):
+        # Default to http:// if no scheme provided
+        gpt2giga_url_normalized = f"http://{gpt2giga_url_normalized}"
+        logger.info(f"Normalized gpt2giga URL: {gpt2giga_url} -> {gpt2giga_url_normalized}")
+    else:
+        logger.info(f"gpt2giga URL: {gpt2giga_url_normalized}")
+    gpt2giga_url = gpt2giga_url_normalized
     logger.info(f"Vector DB type: {vector_db_type}")
     logger.info(f"Incremental: {incremental}")
 

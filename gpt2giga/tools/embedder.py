@@ -17,7 +17,13 @@ class CodebaseEmbedder:
         batch_size: int = 100,
         timeout: float = 60.0,
     ):
-        self.gpt2giga_url = gpt2giga_url.rstrip("/")
+        # Normalize URL: ensure it has a scheme
+        gpt2giga_url = gpt2giga_url.strip().rstrip("/")
+        if not gpt2giga_url.startswith(("http://", "https://")):
+            # Default to http:// if no scheme provided
+            gpt2giga_url = f"http://{gpt2giga_url}"
+        
+        self.gpt2giga_url = gpt2giga_url
         self.model = model
         self.batch_size = batch_size
         self.timeout = timeout
@@ -35,7 +41,17 @@ class CodebaseEmbedder:
         # Create HTTP client if not provided
         close_client = False
         if client is None:
-            client = httpx.AsyncClient(timeout=self.timeout)
+            # Increase connect timeout for initial connection attempts
+            timeout_config = httpx.Timeout(
+                connect=10.0,  # Allow more time for initial connection
+                read=self.timeout,
+                write=30.0,
+                pool=None
+            )
+            client = httpx.AsyncClient(
+                timeout=timeout_config,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
             close_client = True
 
         try:
@@ -119,7 +135,37 @@ class CodebaseEmbedder:
                     if attempt < retries - 1:
                         continue
                 raise
+            except httpx.ConnectError as e:
+                # Connection failed - log details and re-raise
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Connection error to {url} (attempt {attempt + 1}/{retries}): {e}. "
+                    f"Check if gpt2giga service is running at {self.gpt2giga_url}"
+                )
+                if attempt < retries - 1:
+                    wait_time = 2 ** attempt
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise
+            except httpx.TimeoutError as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Timeout connecting to {url} (attempt {attempt + 1}/{retries}): {e}"
+                )
+                if attempt < retries - 1:
+                    wait_time = 2 ** attempt
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise
             except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Unexpected error calling {url} (attempt {attempt + 1}/{retries}): {e}",
+                    exc_info=True
+                )
                 if attempt < retries - 1:
                     wait_time = 2 ** attempt
                     await asyncio.sleep(wait_time)

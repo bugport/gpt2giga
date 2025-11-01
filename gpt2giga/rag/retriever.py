@@ -25,7 +25,12 @@ class RAGRetriever:
     ):
         self.vector_db = vector_db
         self.collection_name = collection_name
-        self.gpt2giga_url = gpt2giga_url.rstrip("/")
+        # Normalize URL: ensure it has a scheme
+        gpt2giga_url = gpt2giga_url.strip().rstrip("/")
+        if not gpt2giga_url.startswith(("http://", "https://")):
+            # Default to http:// if no scheme provided
+            gpt2giga_url = f"http://{gpt2giga_url}"
+        self.gpt2giga_url = gpt2giga_url
         self.embedding_model = embedding_model
         self.top_k = top_k
         self.min_similarity = min_similarity
@@ -102,10 +107,27 @@ class RAGRetriever:
                         
                         return embedding if isinstance(embedding, list) else []
                 except httpx.HTTPStatusError as e:
-                    self.logger.error(f"HTTP error generating query embedding: {e.response.status_code} - {e.response.text[:200]}")
+                    self.logger.error(
+                        f"HTTP error generating query embedding: {e.response.status_code} - {e.response.text[:200]}. "
+                        f"URL: {url}"
+                    )
+                    return None
+                except httpx.ConnectError as e:
+                    self.logger.error(
+                        f"Connection error generating query embedding to {url}: {e}. "
+                        f"Check if gpt2giga service is running at {self.gpt2giga_url}"
+                    )
+                    return None
+                except httpx.TimeoutError as e:
+                    self.logger.error(
+                        f"Timeout error generating query embedding to {url}: {e}"
+                    )
                     return None
                 except httpx.RequestError as e:
-                    self.logger.error(f"Request error generating query embedding: {e}")
+                    self.logger.error(
+                        f"Request error generating query embedding to {url}: {e}",
+                        exc_info=True
+                    )
                     return None
         except Exception as e:
             self.logger.error(f"Error generating query embedding: {e}", exc_info=True)
