@@ -12,14 +12,55 @@ class QdrantVectorDB(VectorDB):
     def __init__(self, url: Optional[str] = None, api_key: Optional[str] = None):
         try:
             if url:
-                self.client = QdrantClient(url=url, api_key=api_key)
+                # Normalize URL: ensure it has a scheme
+                url_normalized = url.strip().rstrip("/")
+                if not url_normalized.startswith(("http://", "https://")):
+                    # Default to http:// if no scheme provided
+                    url_normalized = f"http://{url_normalized}"
+                
+                # Parse URL to extract components for better error handling
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url_normalized)
+                    host = parsed.hostname or "localhost"
+                    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                    use_https = parsed.scheme == "https"
+                    prefix = parsed.path.rstrip("/") if parsed.path and parsed.path != "/" else None
+                    
+                    # Only pass api_key if it's not None and not empty
+                    client_kwargs = {
+                        "host": host,
+                        "port": port,
+                        "https": use_https,
+                    }
+                    if prefix:
+                        client_kwargs["prefix"] = prefix
+                    if api_key:
+                        client_kwargs["api_key"] = api_key
+                    
+                    self.client = QdrantClient(**client_kwargs)
+                except Exception as parse_error:
+                    # Fallback to URL-based initialization if parsing fails
+                    # Only pass api_key if it's provided
+                    client_kwargs = {"url": url_normalized}
+                    if api_key:
+                        client_kwargs["api_key"] = api_key
+                    self.client = QdrantClient(**client_kwargs)
             else:
+                # Default to localhost:6333
                 self.client = QdrantClient(host="localhost", port=6333)
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"Failed to initialize Qdrant client: File not found error. "
+                f"This might indicate QdrantClient is trying to access a local file. "
+                f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
+                f"Original error: {e}"
+            ) from e
         except Exception as e:
             raise RuntimeError(
                 f"Failed to initialize Qdrant client: {e}. "
-                f"URL: {url or 'localhost:6333'}. "
-                f"Make sure Qdrant server is running or the URL is correct."
+                f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
+                f"Make sure Qdrant server is running and accessible at the URL."
             ) from e
 
     async def _ensure_collection(self, collection_name: str, vector_size: int = 1024):
