@@ -213,21 +213,81 @@ fi
 
 # Determine Python executable
 PYTHON=""
-if command -v poetry &> /dev/null && [ -f "$ROOT_DIR/pyproject.toml" ]; then
-  # Try poetry first
+PYTHONPATH_SET=""
+
+# Try workspace hierarchical venv first (e.g., /Users/ineutov/Projects/.venv)
+VENV_ROOT="$(cd "$ROOT_DIR/.." && pwd)/.venv"
+if [ -d "$VENV_ROOT" ]; then
+  # Try Python 3.14, 3.11, 3.9 in order
+  if [ -f "$VENV_ROOT/global-3.14/bin/python" ]; then
+    PYTHON="$VENV_ROOT/global-3.14/bin/python"
+  elif [ -f "$VENV_ROOT/global-3.11/bin/python" ]; then
+    PYTHON="$VENV_ROOT/global-3.11/bin/python"
+  elif [ -f "$VENV_ROOT/global-3.9/bin/python" ]; then
+    PYTHON="$VENV_ROOT/global-3.9/bin/python"
+  fi
+  
+  # Check if required dependencies are available in the venv
+  if [ -n "$PYTHON" ]; then
+    # Check for gigachat (most critical for gpt2giga)
+    if ! $PYTHON -c "import gigachat" 2>/dev/null; then
+      # Try to install missing dependencies if possible
+      echo "Warning: Some dependencies are missing in the venv." >&2
+      echo "Installing gpt2giga dependencies..." >&2
+      if $PYTHON -m pip install -q -e "$ROOT_DIR" 2>/dev/null || $PYTHON -m pip install -q httpx fastapi uvicorn gigachat tiktoken openai aioitertools python-dotenv 2>/dev/null; then
+        echo "Dependencies installed successfully." >&2
+      else
+        echo "Error: Could not install dependencies automatically." >&2
+        echo "Please run: pip install -e $ROOT_DIR" >&2
+        echo "OR: pip install httpx fastapi uvicorn gigachat tiktoken openai aioitertools python-dotenv" >&2
+        PYTHON=""  # Mark as unavailable if dependencies missing and can't install
+      fi
+    fi
+    
+    if [ -n "$PYTHON" ] && $PYTHON -c "import gigachat" 2>/dev/null; then
+      # Set PYTHONPATH for workspace venv to allow importing gpt2giga from source
+      export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+      PYTHONPATH_SET="true"
+    elif [ -n "$PYTHON" ]; then
+      PYTHON=""  # Still missing dependencies
+    fi
+  fi
+fi
+
+# Try Poetry if available
+if [ -z "$PYTHON" ] && command -v poetry &> /dev/null && [ -f "$ROOT_DIR/pyproject.toml" ]; then
   PYTHON="poetry run python"
-elif [ -f "$ROOT_DIR/.venv/bin/python" ]; then
-  # Try local venv
+fi
+
+# Try local venv
+if [ -z "$PYTHON" ] && [ -f "$ROOT_DIR/.venv/bin/python" ]; then
   PYTHON="$ROOT_DIR/.venv/bin/python"
-elif [ -f "$ROOT_DIR/venv/bin/python" ]; then
-  # Try venv (legacy)
+fi
+
+# Try venv (legacy)
+if [ -z "$PYTHON" ] && [ -f "$ROOT_DIR/venv/bin/python" ]; then
   PYTHON="$ROOT_DIR/venv/bin/python"
-elif command -v python3 &> /dev/null; then
-  # Fallback to system python3
-  PYTHON="python3"
-else
-  echo "Error: Python not found. Please install Python 3.9+ or activate a virtual environment."
-  exit 1
+fi
+
+# If no venv found, use system python and set PYTHONPATH
+if [ -z "$PYTHON" ]; then
+  if command -v python3 &> /dev/null; then
+    PYTHON="python3"
+    # Set PYTHONPATH to include project root so we can import gpt2giga
+    export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+    PYTHONPATH_SET="true"
+    
+    # Warn if dependencies might be missing
+    if ! python3 -c "import httpx" 2>/dev/null; then
+      echo "Warning: httpx not found. Please install dependencies:" >&2
+      echo "  pip install httpx fastapi uvicorn gigachat tiktoken numpy" >&2
+      echo "  OR use a virtual environment with dependencies installed." >&2
+      echo "" >&2
+    fi
+  else
+    echo "Error: Python not found. Please install Python 3.9+ or activate a virtual environment." >&2
+    exit 1
+  fi
 fi
 
 # Run the indexer
