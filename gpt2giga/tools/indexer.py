@@ -214,7 +214,7 @@ def index_codebase_cli():
         "--chunk-size",
         type=int,
         default=None,
-        help="Target tokens per chunk (default: from GPT2GIGA_INDEXER_CHUNK_SIZE or 1000)",
+        help="Target tokens per chunk (default: from GPT2GIGA_INDEXER_CHUNK_SIZE or 2000)",
     )
 
     parser.add_argument(
@@ -285,7 +285,7 @@ def index_codebase_cli():
         args.batch_size or os.getenv("GPT2GIGA_INDEXER_BATCH_SIZE", "100") or 100
     )
     chunk_size = int(
-        args.chunk_size or os.getenv("GPT2GIGA_INDEXER_CHUNK_SIZE", "1000") or 1000
+        args.chunk_size or os.getenv("GPT2GIGA_INDEXER_CHUNK_SIZE", "2000") or 2000
     )
 
     # Default include patterns (C++, SQL, and common languages)

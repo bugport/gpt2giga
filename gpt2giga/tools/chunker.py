@@ -27,7 +27,7 @@ def _get_safe_encoding(model: str = None):
 class CodeChunker:
     """Chunks code appropriately for embedding."""
 
-    def __init__(self, max_tokens: int = 1000, model: str = "gpt-4"):
+    def __init__(self, max_tokens: int = 2000, model: str = "gpt-4"):
         self.max_tokens = max_tokens
         self.encoding = _get_safe_encoding(model)
         if self.encoding is None:
@@ -99,21 +99,23 @@ class CodeChunker:
         result = []
         current_lines = []
         current_tokens = 0
+        line_offset = 0  # Track current line offset from start
 
-        for line in lines:
+        for i, line in enumerate(lines):
             line_tokens = self._count_tokens(line)
             if current_tokens + line_tokens > self.max_tokens and current_lines:
                 # Create chunk from current lines
                 new_chunk = type(chunk)(
                     text="\n".join(current_lines),
                     file_path=chunk.file_path,
-                    start_line=chunk.start_line,
-                    end_line=chunk.start_line + len(current_lines) - 1,
+                    start_line=chunk.start_line + line_offset,
+                    end_line=chunk.start_line + line_offset + len(current_lines) - 1,
                     chunk_type=chunk.chunk_type,
                     language=chunk.language,
                     name=chunk.name,
                 )
                 result.append(new_chunk)
+                line_offset += len(current_lines)
                 current_lines = []
                 current_tokens = 0
 
@@ -125,8 +127,8 @@ class CodeChunker:
             new_chunk = type(chunk)(
                 text="\n".join(current_lines),
                 file_path=chunk.file_path,
-                start_line=chunk.start_line + len(result) * 50,
-                end_line=chunk.end_line,
+                start_line=chunk.start_line + line_offset,
+                end_line=chunk.start_line + line_offset + len(current_lines) - 1,
                 chunk_type=chunk.chunk_type,
                 language=chunk.language,
                 name=chunk.name,

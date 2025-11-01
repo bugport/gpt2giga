@@ -100,7 +100,7 @@ class CodeParser:
         # If no AST chunks found, use line-based fallback
         if not chunks:
             lines = content.split("\n")
-            chunk_size = 50  # lines per chunk
+            chunk_size = 200  # lines per chunk (increased from 50 for better context)
             for i in range(0, len(lines), chunk_size):
                 chunk_lines = lines[i : i + chunk_size]
                 chunks.append(
@@ -121,7 +121,7 @@ class CodeParser:
     ) -> List[CodeChunk]:
         """Parse non-Python files with line-based chunking."""
         lines = content.split("\n")
-        chunk_size = 50  # lines per chunk
+        chunk_size = 200  # lines per chunk (increased from 50 for better context)
         chunks = []
 
         for i in range(0, len(lines), chunk_size):
