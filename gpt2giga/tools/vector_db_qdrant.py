@@ -83,25 +83,46 @@ class QdrantVectorDB(VectorDB):
                 # Default to localhost:6333
                 self.client = QdrantClient(host="localhost", port=6333)
         except FileNotFoundError as e:
+            # Restore env vars before raising
+            if original_env:
+                try:
+                    for key, value in original_env.items():
+                        if value is not None:
+                            os.environ[key] = value
+                        else:
+                            os.environ.pop(key, None)
+                except Exception:
+                    pass
             raise RuntimeError(
                 f"Failed to initialize Qdrant client: File not found error. "
                 f"This might indicate QdrantClient is trying to access a local file. "
                 f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
                 f"Original error: {e}"
             ) from e
-        except (OSError, ValueError, AttributeError) as e:
+        except (OSError, ValueError, AttributeError, TypeError) as e:
+            # Restore env vars before raising
+            if original_env:
+                try:
+                    for key, value in original_env.items():
+                        if value is not None:
+                            os.environ[key] = value
+                        else:
+                            os.environ.pop(key, None)
+                except Exception:
+                    pass
+            
             # Common SSL context errors
             error_str = str(e).lower()
-            if any(keyword in error_str for keyword in ['ssl', 'context', 'certificate', 'verify', 'cert']):
+            if any(keyword in error_str for keyword in ['ssl', 'context', 'certificate', 'verify', 'cert', 'tls']):
+                url_uses_https = url and url.startswith('https://') if url else False
                 raise RuntimeError(
                     f"Failed to initialize Qdrant client due to SSL/TLS error: {e}. "
-                    f"URL: {url or 'localhost:6333'}, HTTPS: {url and url.startswith('https://') if url else False}. "
-                    f"This might be due to:\n"
-                    f"  - SSL certificate verification failing (try setting GPT2GIGA_QDRANT_VERIFY_SSL=false)\n"
-                    f"  - Missing SSL certificates on the system\n"
-                    f"  - Using HTTPS when server only supports HTTP (try http:// instead)\n"
-                    f"If using HTTP (not HTTPS), this error shouldn't occur. "
-                    f"Check your URL: ensure it uses 'http://' for non-SSL connections."
+                    f"URL: {url or 'localhost:6333'}, HTTPS: {url_uses_https}, verify_ssl: {verify_ssl}. "
+                    f"\nTroubleshooting steps:\n"
+                    f"  1. Use HTTP instead of HTTPS (recommended): Change URL to 'http://IP:8333'\n"
+                    f"  2. If you must use HTTPS, set GPT2GIGA_QDRANT_VERIFY_SSL=false to disable certificate verification\n"
+                    f"  3. Ensure system SSL certificates are properly installed\n"
+                    f"  4. Check if Qdrant server actually supports HTTPS (may only support HTTP)"
                 ) from e
             raise RuntimeError(
                 f"Failed to initialize Qdrant client: {e}. "
@@ -109,6 +130,16 @@ class QdrantVectorDB(VectorDB):
                 f"Make sure Qdrant server is running and accessible at the URL."
             ) from e
         except Exception as e:
+            # Restore env vars before raising
+            if original_env:
+                try:
+                    for key, value in original_env.items():
+                        if value is not None:
+                            os.environ[key] = value
+                        else:
+                            os.environ.pop(key, None)
+                except Exception:
+                    pass
             raise RuntimeError(
                 f"Failed to initialize Qdrant client: {e}. "
                 f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
