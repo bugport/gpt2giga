@@ -1,5 +1,6 @@
 """Vector database interface for storing code embeddings."""
 
+import os
 from typing import List, Dict, Any, Optional
 from abc import ABC, abstractmethod
 
