@@ -28,6 +28,27 @@ class QdrantVectorDB(VectorDB):
                 # Auto-detect from URL: False for HTTP, True for HTTPS (unless env says otherwise)
                 verify_ssl = None  # Let QdrantClient use defaults
         
+        # Initialize original_env to empty dict - will be populated if we modify env vars
+        original_env = {}
+        
+        # Set environment variables to affect httpx SSL context creation if needed
+        # QdrantClient uses httpx internally, and these env vars can help with SSL issues
+        try:
+            if verify_ssl is False:
+                # Disable SSL verification at the httpx level
+                # These env vars are used by httpx/httpcore
+                original_env = {
+                    'CURL_CA_BUNDLE': os.environ.get('CURL_CA_BUNDLE'),
+                    'REQUESTS_CA_BUNDLE': os.environ.get('REQUESTS_CA_BUNDLE'),
+                    'SSL_CERT_FILE': os.environ.get('SSL_CERT_FILE'),
+                }
+                # Clear these to prevent httpx from trying to use system certs
+                os.environ.pop('CURL_CA_BUNDLE', None)
+                os.environ.pop('REQUESTS_CA_BUNDLE', None)
+                os.environ.pop('SSL_CERT_FILE', None)
+        except Exception:
+            pass
+        
         try:
             if url:
                 # Normalize URL: ensure it has a scheme
