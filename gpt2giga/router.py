@@ -266,6 +266,7 @@ def _get_metrics_state(app):
     state = getattr(app.state, "_metrics", None)
     if state is None:
         state = {
+            # Embeddings metrics
             "emb_total": 0,
             "emb_timeouts": 0,
             "emb_throttles": 0,
@@ -274,10 +275,22 @@ def _get_metrics_state(app):
             "durations_ms": [],
             "max_samples": 200,
             "emb_total_time_ms": 0.0,
+            "emb_total_wall_ms": 0.0,
+            "emb_success": 0,
             "queue_enqueued": 0,
             "queue_processed": 0,
             "queue_dropped": 0,
             "queue_size": 0,
+            # Completions metrics
+            "comp_total": 0,
+            "comp_success": 0,
+            "comp_errors": 0,
+            "comp_streaming": 0,
+            "comp_non_streaming": 0,
+            "comp_durations_ms": [],
+            "comp_max_samples": 200,
+            "comp_total_time_ms": 0.0,
+            "comp_total_wall_ms": 0.0,
         }
         app.state._metrics = state
     return state
@@ -746,26 +759,73 @@ async def chat_completions(request: Request):
                 )
             data["functions"].append(giga_function)
     chat_messages = request.app.state.request_transformer.send_to_gigachat(data)
+    
+    # Track metrics
+    metrics = _get_metrics_state(request.app)
+    t0 = time.monotonic()
+    
+    try:
+        # Increment total at start
+        metrics["comp_total"] = metrics.get("comp_total", 0) + 1
+    except Exception:
+        pass
+    
     # Use chat-specific client with separate connection pool
     client_chat = getattr(request.app.state, "client_chat", request.app.state.client)
     if not stream:
-        response = await client_chat.achat(chat_messages)
-        if is_response_api:
-            processed = request.app.state.response_processor.process_response_api(
-                data, response, chat_messages.model, is_tool_call
-            )
-        else:
-            processed = request.app.state.response_processor.process_response(
-                response, chat_messages.model, is_tool_call
-            )
-        return processed
+        try:
+            metrics["comp_non_streaming"] = metrics.get("comp_non_streaming", 0) + 1
+            response = await client_chat.achat(chat_messages)
+            elapsed = (time.monotonic() - t0) * 1000.0
+            
+            if is_response_api:
+                processed = request.app.state.response_processor.process_response_api(
+                    data, response, chat_messages.model, is_tool_call
+                )
+            else:
+                processed = request.app.state.response_processor.process_response(
+                    response, chat_messages.model, is_tool_call
+                )
+            
+            # Update metrics on success
+            try:
+                metrics["comp_success"] = metrics.get("comp_success", 0) + 1
+                metrics["comp_total_time_ms"] = metrics.get("comp_total_time_ms", 0.0) + elapsed
+                metrics["comp_total_wall_ms"] = metrics.get("comp_total_wall_ms", 0.0) + elapsed
+                
+                # Track duration for percentiles
+                try:
+                    durations = metrics.get("comp_durations_ms", [])
+                    durations.append(elapsed)
+                    max_samples = metrics.get("comp_max_samples", 200)
+                    if len(durations) > max_samples:
+                        durations[:] = durations[-max_samples:]
+                    metrics["comp_durations_ms"] = durations
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            
+            return processed
+        except Exception as e:
+            # Track error
+            try:
+                metrics["comp_errors"] = metrics.get("comp_errors", 0) + 1
+            except Exception:
+                pass
+            raise
     else:
-
         async def stream_generator(is_response_api: bool) -> AsyncGenerator[str, None]:
             """
             Yields formatted SSE (Server-Sent Events) chunks
             as they arrive from the model.
             """
+            try:
+                metrics["comp_streaming"] = metrics.get("comp_streaming", 0) + 1
+            except Exception:
+                pass
+            stream_start_time = time.monotonic()
+            
             # Coalescing settings (env-configurable):
             # - GPT2GIGA_STREAM_COALESCE_BYTES: integer, when buffered text >= bytes → flush
             #   (0 or unset disables byte-based coalescing)
@@ -952,9 +1012,42 @@ async def chat_completions(request: Request):
                     yield f"data: {json.dumps(chunk_to_yield)}\n\n"
 
             yield "data: [DONE]\n\n"
+            
+            # Track streaming completion
+            try:
+                stream_elapsed = (time.monotonic() - stream_start_time) * 1000.0
+                metrics["comp_success"] = metrics.get("comp_success", 0) + 1
+                metrics["comp_total_time_ms"] = metrics.get("comp_total_time_ms", 0.0) + stream_elapsed
+                metrics["comp_total_wall_ms"] = metrics.get("comp_total_wall_ms", 0.0) + stream_elapsed
+                
+                # Track duration for percentiles
+                try:
+                    durations = metrics.get("comp_durations_ms", [])
+                    durations.append(stream_elapsed)
+                    max_samples = metrics.get("comp_max_samples", 200)
+                    if len(durations) > max_samples:
+                        durations[:] = durations[-max_samples:]
+                    metrics["comp_durations_ms"] = durations
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        async def stream_generator_wrapper(is_response_api: bool) -> AsyncGenerator[str, None]:
+            """Wrapper to catch exceptions and track metrics."""
+            try:
+                async for chunk in stream_generator(is_response_api):
+                    yield chunk
+            except Exception:
+                # Track streaming error
+                try:
+                    metrics["comp_errors"] = metrics.get("comp_errors", 0) + 1
+                except Exception:
+                    pass
+                raise
 
         return StreamingResponse(
-            stream_generator(is_response_api), media_type="text/event-stream"
+            stream_generator_wrapper(is_response_api), media_type="text/event-stream"
         )
 
 
@@ -1291,6 +1384,70 @@ async def metrics(request: Request):
             lines.append(f"emb_sys_avg_s 0.000000")
     except Exception:
         lines.append(f"emb_sys_avg_s 0.000000")
+    
+    # Completions metrics
+    lines.append("")  # Blank line separator
+    comp_total = int(m.get("comp_total", 0) or 0)
+    comp_success = int(m.get("comp_success", 0) or 0)
+    comp_errors = int(m.get("comp_errors", 0) or 0)
+    comp_streaming = int(m.get("comp_streaming", 0) or 0)
+    comp_non_streaming = int(m.get("comp_non_streaming", 0) or 0)
+    comp_durs = list(m.get("comp_durations_ms", []) or [])
+    comp_p50 = comp_p95 = comp_p99 = 0.0
+    if comp_durs:
+        try:
+            comp_d_sorted = sorted(comp_durs)
+            comp_p50 = statistics.median(comp_d_sorted)
+            comp_idx95 = max(0, int(0.95 * (len(comp_d_sorted) - 1)))
+            comp_idx99 = max(0, int(0.99 * (len(comp_d_sorted) - 1)))
+            comp_p95 = float(comp_d_sorted[comp_idx95])
+            comp_p99 = float(comp_d_sorted[comp_idx99])
+        except Exception:
+            pass
+    
+    lines.append(f"comp_total {comp_total}")
+    lines.append(f"comp_success {comp_success}")
+    lines.append(f"comp_errors {comp_errors}")
+    lines.append(f"comp_streaming {comp_streaming}")
+    lines.append(f"comp_non_streaming {comp_non_streaming}")
+    lines.append(f"comp_p50_ms {comp_p50:.3f}")
+    lines.append(f"comp_p95_ms {comp_p95:.3f}")
+    lines.append(f"comp_p99_ms {comp_p99:.3f}")
+    
+    # Average time per completion since start
+    try:
+        comp_total_time_ms = float(m.get("comp_total_time_ms", 0.0) or 0.0)
+        if comp_success > 0:
+            comp_avg_ms = comp_total_time_ms / float(comp_success)
+            lines.append(f"comp_avg_ms {comp_avg_ms:.3f}")
+        else:
+            lines.append(f"comp_avg_ms 0.000")
+    except Exception:
+        lines.append(f"comp_avg_ms 0.000")
+    
+    # Average including all time (in seconds)
+    try:
+        comp_total_wall_ms = float(m.get("comp_total_wall_ms", 0.0) or 0.0)
+        if comp_success > 0:
+            comp_avg_s = (comp_total_wall_ms / float(comp_success)) / 1000.0
+            lines.append(f"comp_avg_s {comp_avg_s:.6f}")
+        else:
+            lines.append(f"comp_avg_s 0.000000")
+    except Exception:
+        lines.append(f"comp_avg_s 0.000000")
+    
+    # System-wide average time since start divided by successes
+    try:
+        start_time = getattr(request.app.state, "_start_time", None)
+        if start_time is not None and comp_success > 0:
+            now = asyncio.get_event_loop().time()
+            uptime_s = max(0.0, now - float(start_time))
+            comp_sys_avg_s = uptime_s / float(comp_success)
+            lines.append(f"comp_sys_avg_s {comp_sys_avg_s:.6f}")
+        else:
+            lines.append(f"comp_sys_avg_s 0.000000")
+    except Exception:
+        lines.append(f"comp_sys_avg_s 0.000000")
 
     return Response("\n".join(lines) + "\n", media_type="text/plain")
 
