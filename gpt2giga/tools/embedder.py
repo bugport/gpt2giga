@@ -55,16 +55,52 @@ class CodebaseEmbedder:
             close_client = True
 
         try:
-            # Batch processing
+            # Batch processing with adaptive batch size reduction for 413 errors
             results = []
-            for i in range(0, len(texts), self.batch_size):
-                batch_texts = texts[i : i + self.batch_size]
-                batch_chunks = chunks[i : i + self.batch_size]
+            current_batch_size = self.batch_size
+            i = 0
+            
+            while i < len(texts):
+                # Calculate current batch
+                batch_texts = texts[i : i + current_batch_size]
+                batch_chunks = chunks[i : i + current_batch_size]
+                
+                if not batch_texts:
+                    break
 
                 # Call embeddings endpoint
-                response = await self._call_embeddings(
-                    batch_texts, client, retries=3
-                )
+                try:
+                    response = await self._call_embeddings(
+                        batch_texts, client, retries=3
+                    )
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 413:
+                        # Request too large - reduce batch size and retry
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        
+                        if current_batch_size > 1:
+                            # Reduce batch size by half (minimum 1)
+                            new_batch_size = max(1, current_batch_size // 2)
+                            logger.warning(
+                                f"Request too large (413) with batch size {current_batch_size}. "
+                                f"Reducing to {new_batch_size} and retrying..."
+                            )
+                            current_batch_size = new_batch_size
+                            # Don't advance i, retry with smaller batch
+                            continue
+                        else:
+                            # Already at minimum batch size, skip this item
+                            logger.error(
+                                f"Request too large even with single item (size: {len(batch_texts[0])} chars). "
+                                f"Skipping this chunk."
+                            )
+                            results.append({"chunk": batch_chunks[0], "embedding": []})
+                            i += 1
+                            continue
+                    else:
+                        # Other HTTP errors, re-raise
+                        raise
 
                 if response:
                     embeddings = response.get("data", [])
@@ -100,10 +136,13 @@ class CodebaseEmbedder:
                                 "embedding": embedding if isinstance(embedding, list) else [],
                             }
                         )
+                    # Successfully processed batch, advance to next
+                    i += len(batch_texts)
                 else:
                     # Failed to get embeddings for this batch
                     for chunk in batch_chunks:
                         results.append({"chunk": chunk, "embedding": []})
+                    i += len(batch_texts)
 
             return results
         finally:
@@ -134,6 +173,16 @@ class CodebaseEmbedder:
                     await asyncio.sleep(wait_time)
                     if attempt < retries - 1:
                         continue
+                elif e.response.status_code == 413:
+                    # Request too large: reduce batch size
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Request too large (413) for batch of {len(texts)} items. "
+                        f"Suggest reducing batch_size (current: {self.batch_size})"
+                    )
+                    # Re-raise to let caller handle batch size reduction
+                    raise
                 raise
             except httpx.ConnectError as e:
                 # Connection failed - log details and re-raise

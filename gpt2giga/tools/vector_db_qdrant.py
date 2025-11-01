@@ -31,23 +31,39 @@ class QdrantVectorDB(VectorDB):
         # Initialize original_env to empty dict - will be populated if we modify env vars
         original_env = {}
         
-        # Set environment variables to affect httpx SSL context creation if needed
-        # QdrantClient uses httpx internally, and these env vars can help with SSL issues
-        try:
-            if verify_ssl is False:
-                # Disable SSL verification at the httpx level
-                # These env vars are used by httpx/httpcore
+        # For HTTP connections, clear SSL cert environment variables to prevent FileNotFoundError
+        # These env vars can point to certificate files that don't exist, causing errors
+        # even when using HTTP (where certs aren't needed)
+        url_normalized_for_check = url.strip().rstrip("/") if url else ""
+        if not url_normalized_for_check.startswith("https://"):
+            # We're using HTTP (or no URL yet), so clear SSL cert env vars
+            try:
                 original_env = {
                     'CURL_CA_BUNDLE': os.environ.get('CURL_CA_BUNDLE'),
                     'REQUESTS_CA_BUNDLE': os.environ.get('REQUESTS_CA_BUNDLE'),
                     'SSL_CERT_FILE': os.environ.get('SSL_CERT_FILE'),
+                    'SSL_CERT_DIR': os.environ.get('SSL_CERT_DIR'),
                 }
-                # Clear these to prevent httpx from trying to use system certs
-                os.environ.pop('CURL_CA_BUNDLE', None)
-                os.environ.pop('REQUESTS_CA_BUNDLE', None)
-                os.environ.pop('SSL_CERT_FILE', None)
-        except Exception:
-            pass
+                # Temporarily clear these to prevent FileNotFoundError for missing cert files
+                # QdrantClient's httpx will try to read these even for HTTP connections
+                for key in ['CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE', 'SSL_CERT_FILE', 'SSL_CERT_DIR']:
+                    os.environ.pop(key, None)
+            except Exception:
+                pass
+        elif verify_ssl is False:
+            # We're using HTTPS but want to disable verification, so clear cert paths
+            try:
+                if not original_env:
+                    original_env = {
+                        'CURL_CA_BUNDLE': os.environ.get('CURL_CA_BUNDLE'),
+                        'REQUESTS_CA_BUNDLE': os.environ.get('REQUESTS_CA_BUNDLE'),
+                        'SSL_CERT_FILE': os.environ.get('SSL_CERT_FILE'),
+                        'SSL_CERT_DIR': os.environ.get('SSL_CERT_DIR'),
+                    }
+                for key in ['CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE', 'SSL_CERT_FILE', 'SSL_CERT_DIR']:
+                    os.environ.pop(key, None)
+            except Exception:
+                pass
         
         try:
             if url:
@@ -114,11 +130,37 @@ class QdrantVectorDB(VectorDB):
                             os.environ.pop(key, None)
                 except Exception:
                     pass
+            # FileNotFoundError can occur if:
+            # 1. SSL certificate files are referenced but missing
+            # 2. Local Qdrant storage path is referenced but missing
+            # 3. System SSL certificate bundle is missing
+            error_msg = str(e)
+            url_uses_https = url and url.startswith('https://') if url else False
+            
+            troubleshooting = []
+            if 'cert' in error_msg.lower() or 'ssl' in error_msg.lower():
+                troubleshooting.extend([
+                    "  - SSL certificate file missing (if using HTTPS)",
+                    "  - Try using HTTP instead: Change URL to 'http://IP:8333'",
+                    "  - Check SSL certificate paths in system environment",
+                ])
+            elif 'path' in error_msg.lower() or 'storage' in error_msg.lower():
+                troubleshooting.extend([
+                    "  - QdrantClient might be trying to use local storage",
+                    "  - Ensure you're using a remote URL (not local path)",
+                ])
+            else:
+                troubleshooting.extend([
+                    "  - Check if the file path mentioned in error exists",
+                    "  - Verify Qdrant server URL is correct",
+                ])
+            
             raise RuntimeError(
-                f"Failed to initialize Qdrant client: File not found error. "
-                f"This might indicate QdrantClient is trying to access a local file. "
-                f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
-                f"Original error: {e}"
+                f"Failed to initialize Qdrant client: File not found error: {e}. "
+                f"URL: {url or 'localhost:6333'}, HTTPS: {url_uses_https}, API key: {'provided' if api_key else 'none'}. "
+                f"\nTroubleshooting:\n" + "\n".join(troubleshooting) +
+                f"\nFor HTTP connections, this error shouldn't occur. "
+                f"If using HTTPS, try switching to HTTP: 'http://IP:8333'"
             ) from e
         except (OSError, ValueError, AttributeError, TypeError) as e:
             # Restore env vars before raising

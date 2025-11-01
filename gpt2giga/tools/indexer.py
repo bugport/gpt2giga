@@ -281,8 +281,10 @@ def index_codebase_cli():
     vector_db_api_key = (
         args.vector_db_api_key or os.getenv("GPT2GIGA_INDEXER_VECTOR_DB_API_KEY")
     )
+    # Default batch size reduced from 100 to 10 to avoid 413 errors
+    # The embedder will automatically reduce batch size further if 413 occurs
     batch_size = int(
-        args.batch_size or os.getenv("GPT2GIGA_INDEXER_BATCH_SIZE", "100") or 100
+        args.batch_size or os.getenv("GPT2GIGA_INDEXER_BATCH_SIZE", "10") or 10
     )
     chunk_size = int(
         args.chunk_size or os.getenv("GPT2GIGA_INDEXER_CHUNK_SIZE", "2000") or 2000
