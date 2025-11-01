@@ -620,7 +620,9 @@ async def chat_completions(request: Request):
     max_output_tokens = limits["max_output_tokens"]
     
     # RAG: Retrieve relevant code context if enabled (BEFORE token validation)
-    rag_retriever = getattr(request.app.state, "rag_retriever", None)
+    # Skip RAG if this is an embeddings request (to prevent loops)
+    skip_rag = request.url.path.endswith("/embeddings") or "/embeddings" in request.url.path
+    rag_retriever = getattr(request.app.state, "rag_retriever", None) if not skip_rag else None
     if rag_retriever:
         # Extract user query from messages
         user_messages = [

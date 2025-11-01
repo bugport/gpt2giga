@@ -64,39 +64,51 @@ class RAGRetriever:
         }
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                
-                embedding_data = data.get("data", [])
-                if embedding_data:
-                    embedding = embedding_data[0].get("embedding", [])
-                    # Handle base64 if needed
-                    if isinstance(embedding, str):
-                        import base64
-                        try:
-                            # Decode base64 if needed
-                            embedding_bytes = base64.b64decode(embedding)
-                            # Convert bytes to list if needed
-                            if isinstance(embedding_bytes, bytes):
-                                import struct
-                                # Try to decode as float array
-                                embedding = list(
-                                    struct.unpack(
-                                        f"{len(embedding_bytes)//4}f", embedding_bytes
-                                    )
-                                )
-                        except Exception:
-                            # If decoding fails, try to parse as JSON
-                            try:
-                                embedding = json.loads(embedding)
-                            except Exception:
-                                pass
+            # Use a separate HTTP client with connection pooling disabled to avoid loops
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+                follow_redirects=False,  # Prevent redirect loops
+            ) as client:
+                try:
+                    response = await client.post(url, json=payload, follow_redirects=False)
+                    response.raise_for_status()
+                    data = response.json()
                     
-                    return embedding if isinstance(embedding, list) else []
+                    embedding_data = data.get("data", [])
+                    if embedding_data:
+                        embedding = embedding_data[0].get("embedding", [])
+                        # Handle base64 if needed
+                        if isinstance(embedding, str):
+                            import base64
+                            try:
+                                # Decode base64 if needed
+                                embedding_bytes = base64.b64decode(embedding)
+                                # Convert bytes to list if needed
+                                if isinstance(embedding_bytes, bytes):
+                                    import struct
+                                    # Try to decode as float array
+                                    embedding = list(
+                                        struct.unpack(
+                                            f"{len(embedding_bytes)//4}f", embedding_bytes
+                                        )
+                                    )
+                            except Exception:
+                                # If decoding fails, try to parse as JSON
+                                try:
+                                    embedding = json.loads(embedding)
+                                except Exception:
+                                    pass
+                        
+                        return embedding if isinstance(embedding, list) else []
+                except httpx.HTTPStatusError as e:
+                    self.logger.error(f"HTTP error generating query embedding: {e.response.status_code} - {e.response.text[:200]}")
+                    return None
+                except httpx.RequestError as e:
+                    self.logger.error(f"Request error generating query embedding: {e}")
+                    return None
         except Exception as e:
-            self.logger.error(f"Error generating query embedding: {e}")
+            self.logger.error(f"Error generating query embedding: {e}", exc_info=True)
             return None
     
     def format_context_for_messages(self, results: List[Dict[str, Any]]) -> str:
