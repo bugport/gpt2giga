@@ -76,14 +76,24 @@ ENV_FILE="${CLI_ENV_FILE:-${ENV_FILE:-$ROOT_DIR/.env}}"
 if [ -f "$ENV_FILE" ]; then
   # Export valid KEY=VALUE lines from .env (skip comments and invalid lines)
   while IFS= read -r line || [ -n "$line" ]; do
-    # Skip empty lines, comments, and lines without '='
+    # Trim whitespace
     line_trimmed=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    if [ -n "$line_trimmed" ] && [ "${line_trimmed#\#}" = "$line_trimmed" ] && [ "${line_trimmed#*=}" != "$line_trimmed" ]; then
-      # Only export if it looks like a valid KEY=VALUE assignment
+    # Skip empty lines and comments
+    if [ -z "$line_trimmed" ] || [ "${line_trimmed#\#}" != "$line_trimmed" ]; then
+      continue
+    fi
+    # Check if line contains '=' (is a KEY=VALUE assignment)
+    if [[ "$line_trimmed" == *"="* ]]; then
+      # Extract key part (before first =)
       key="${line_trimmed%%=*}"
+      key_trimmed=$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+      # Extract value part (after first =)
+      value="${line_trimmed#*=}"
+      value_trimmed=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
       # Check if key is a valid identifier (starts with letter/underscore, contains only alphanumeric/underscore)
-      if echo "$key" | grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*$'; then
-        export "$line_trimmed" 2>/dev/null || true
+      if echo "$key_trimmed" | grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*$'; then
+        # Export the variable (handles quoted and unquoted values)
+        export "${key_trimmed}=${value_trimmed}" 2>/dev/null || true
       fi
     fi
   done < "$ENV_FILE"
