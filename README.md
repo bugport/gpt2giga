@@ -216,6 +216,7 @@ gpt2giga \
 | [n8n](https://n8n.io/)                  | Платформа для создания nocode-агентов                                                                                                              |
 | [Cline](https://github.com/cline/cline) | AI-ассистент разработчика                                                                                                                          |
 | [OpenHands](https://github.com/All-Hands-AI/OpenHands) | AI-ассистент для разработки<br /> Подробнее о запуске и настройке OpenHands для работы с gpt2giga — в [README](/integrations/openhands)                                                                                                                        |
+| [Roo-Code](https://github.com/roocode/roocode) | Код-индексатор и поисковая система для кода<br /> Подробнее о настройке Roo-Code для работы с gpt2giga — в [README](/integrations/roocode)                                                                                                                        |
 
 ## Лицензия
 

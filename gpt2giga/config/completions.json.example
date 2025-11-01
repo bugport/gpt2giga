@@ -1,0 +1,10 @@
+[
+  { "model": "GigaChat", "max_input_tokens": 32000, "max_output_tokens": 10000 },
+  { "model": "GigaChat-Pro", "max_input_tokens": 32000, "max_output_tokens": 10000 },
+  { "model": "GigaChat-Max", "max_input_tokens": 32000, "max_output_tokens": 10000 },
+  { "model": "GigaChat-2", "max_input_tokens": 128000, "max_output_tokens": 16384 },
+  { "model": "GigaChat-2-Pro", "max_input_tokens": 128000, "max_output_tokens": 16384 },
+  { "model": "GigaChat-2-Max", "max_input_tokens": 128000, "max_output_tokens": 16384 },
+  { "model": "DEFAULT", "max_input_tokens": 32000, "max_output_tokens": 10000 }
+]
+

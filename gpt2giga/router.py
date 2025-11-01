@@ -76,6 +76,151 @@ def _get_token_limit_for_model(app, model_name: str) -> int:
     norm = "".join(ch if ch.isalnum() else "_" for ch in model_name).upper()
     return int(cfg.get(norm, 0) or 0)
 
+
+def _load_completions_config(app) -> dict:
+    """Load completions token limits from config file."""
+    cfg = getattr(app.state, "completions_config", None)
+    if cfg is not None:
+        return cfg
+    # Resolve config path: env override or default to project config/completions.json
+    env_path = os.getenv("GPT2GIGA_COMPLETIONS_CONFIG_FILE", "").strip()
+    if env_path:
+        path = Path(env_path)
+    else:
+        path = (Path(__file__).resolve().parent.parent / "config" / "completions.json")
+    try:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+        else:
+            raw = {}
+    except Exception:
+        raw = {}
+
+    # Normalize array format -> map {MODEL: {"max_input_tokens": X, "max_output_tokens": Y}}
+    cfg_map: dict[str, dict] = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                name = item.get("model")
+                if name:
+                    cfg_map[name.upper()] = {
+                        "max_input_tokens": int(item.get("max_input_tokens", 32000)),
+                        "max_output_tokens": int(item.get("max_output_tokens", 10000))
+                    }
+    elif isinstance(raw, dict):
+        src = raw.get("limits") if isinstance(raw.get("limits"), dict) else raw
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, dict):
+                    cfg_map[str(k).upper()] = {
+                        "max_input_tokens": int(v.get("max_input_tokens", 32000)),
+                        "max_output_tokens": int(v.get("max_output_tokens", 10000))
+                    }
+
+    app.state.completions_config = cfg_map
+    return cfg_map
+
+
+def _get_completions_limits(app, model_name: str) -> dict:
+    """Get token limits for a chat completions model."""
+    cfg = _load_completions_config(app)
+    if not isinstance(cfg, dict):
+        # Default fallback
+        return {"max_input_tokens": 32000, "max_output_tokens": 10000}
+    if not model_name:
+        default = cfg.get("DEFAULT", {})
+        return {
+            "max_input_tokens": int(default.get("max_input_tokens", 32000)),
+            "max_output_tokens": int(default.get("max_output_tokens", 10000))
+        }
+    key = model_name.upper()
+    if key in cfg:
+        return {
+            "max_input_tokens": int(cfg[key].get("max_input_tokens", 32000)),
+            "max_output_tokens": int(cfg[key].get("max_output_tokens", 10000))
+        }
+    norm = "".join(ch if ch.isalnum() else "_" for ch in model_name).upper()
+    default_limits = cfg.get(norm, cfg.get("DEFAULT", {}))
+    return {
+        "max_input_tokens": int(default_limits.get("max_input_tokens", 32000)),
+        "max_output_tokens": int(default_limits.get("max_output_tokens", 10000))
+    }
+
+
+def _count_message_tokens(messages: list, model_name: str) -> int:
+    """Count tokens in a list of messages using tiktoken."""
+    try:
+        enc = tiktoken.encoding_for_model(model_name)
+    except Exception:
+        # Fallback to cl100k_base (GPT-3.5/4 encoding)
+        enc = tiktoken.get_encoding("cl100k_base")
+    
+    num_tokens = 0
+    for message in messages:
+        # Each message has ~4 tokens overhead (role, content, etc.)
+        num_tokens += 4
+        content = message.get("content", "")
+        if isinstance(content, str):
+            num_tokens += len(enc.encode(content))
+        elif isinstance(content, list):
+            # Multi-modal content
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text", "")
+                    if text:
+                        num_tokens += len(enc.encode(text))
+                    # Images add tokens but we approximate
+                    if item.get("type") == "image_url":
+                        num_tokens += 85  # Approximate for images
+    
+    return num_tokens
+
+
+def _truncate_messages(messages: list, model_name: str, max_input_tokens: int) -> list:
+    """Truncate messages to fit within token limit, preserving system message."""
+    if not messages:
+        return messages
+    
+    # Try to preserve system message if present
+    system_msg = None
+    other_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msg = msg
+        else:
+            other_messages.append(msg)
+    
+    # Count tokens
+    current_tokens = _count_message_tokens(messages, model_name)
+    if current_tokens <= max_input_tokens:
+        return messages
+    
+    # Truncate from the oldest non-system messages if needed
+    # Strategy: keep system, truncate oldest user/assistant messages
+    truncated = []
+    if system_msg:
+        system_tokens = _count_message_tokens([system_msg], model_name)
+        available_tokens = max_input_tokens - system_tokens
+    else:
+        available_tokens = max_input_tokens
+    
+    # Add messages from the end until we hit the limit
+    temp_msgs = []
+    temp_tokens = 0
+    for msg in reversed(other_messages):
+        msg_tokens = _count_message_tokens([msg], model_name)
+        if temp_tokens + msg_tokens <= available_tokens:
+            temp_msgs.insert(0, msg)
+            temp_tokens += msg_tokens
+        else:
+            break
+    
+    if system_msg:
+        return [system_msg] + temp_msgs
+    return temp_msgs
+
+
 def _get_rate_state(app):
     state = getattr(app.state, "_emb_rate", None)
     if state is None:
@@ -467,6 +612,40 @@ async def chat_completions(request: Request):
             logger.debug("POST /chat/completions body: %s", json.dumps(data))
     except Exception:
         pass
+    
+    # Get model and token limits
+    gpt_model = data.get("model", "GigaChat")
+    limits = _get_completions_limits(request.app, gpt_model)
+    max_input_tokens = limits["max_input_tokens"]
+    max_output_tokens = limits["max_output_tokens"]
+    
+    # Validate and truncate input messages
+    if "messages" in data and isinstance(data["messages"], list):
+        input_tokens = _count_message_tokens(data["messages"], gpt_model)
+        if input_tokens > max_input_tokens:
+            logger = getattr(request.app.state, "logger", None)
+            if logger:
+                logger.warning(
+                    "Input tokens (%d) exceed limit (%d) for model %s, truncating",
+                    input_tokens, max_input_tokens, gpt_model
+                )
+            data["messages"] = _truncate_messages(data["messages"], gpt_model, max_input_tokens)
+    
+    # Validate and cap max_tokens / max_output_tokens parameter
+    if "max_tokens" in data or "max_output_tokens" in data:
+        requested_max = data.get("max_tokens") or data.get("max_output_tokens")
+        if requested_max and requested_max > max_output_tokens:
+            logger = getattr(request.app.state, "logger", None)
+            if logger:
+                logger.warning(
+                    "Requested max_tokens (%d) exceeds limit (%d) for model %s, capping",
+                    requested_max, max_output_tokens, gpt_model
+                )
+            if "max_tokens" in data:
+                data["max_tokens"] = max_output_tokens
+            if "max_output_tokens" in data:
+                data["max_output_tokens"] = max_output_tokens
+    
     stream = data.get("stream", False)
     is_tool_call = "tools" in data
     is_response_api = "input" in data
