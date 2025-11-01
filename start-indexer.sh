@@ -234,23 +234,23 @@ if [ -d "$VENV_ROOT" ]; then
       # Try to install missing dependencies if possible
       echo "Warning: Some dependencies are missing in the venv." >&2
       echo "Installing gpt2giga dependencies..." >&2
-      if $PYTHON -m pip install -q -e "$ROOT_DIR" 2>/dev/null || $PYTHON -m pip install -q httpx fastapi uvicorn gigachat tiktoken openai aioitertools python-dotenv 2>/dev/null; then
+      if $PYTHON -m pip install -q -e "$ROOT_DIR" 2>/dev/null; then
+        echo "Dependencies installed successfully." >&2
+      elif $PYTHON -m pip install -q httpx fastapi uvicorn gigachat tiktoken openai aioitertools python-dotenv numpy 2>/dev/null; then
         echo "Dependencies installed successfully." >&2
       else
         echo "Error: Could not install dependencies automatically." >&2
-        echo "Please run: pip install -e $ROOT_DIR" >&2
-        echo "OR: pip install httpx fastapi uvicorn gigachat tiktoken openai aioitertools python-dotenv" >&2
-        PYTHON=""  # Mark as unavailable if dependencies missing and can't install
+        echo "Please run manually:" >&2
+        echo "  $PYTHON -m pip install -e $ROOT_DIR" >&2
+        echo "OR:" >&2
+        echo "  $PYTHON -m pip install httpx fastapi uvicorn gigachat tiktoken openai aioitertools python-dotenv numpy" >&2
+        exit 1
       fi
     fi
     
-    if [ -n "$PYTHON" ] && $PYTHON -c "import gigachat" 2>/dev/null; then
-      # Set PYTHONPATH for workspace venv to allow importing gpt2giga from source
-      export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-      PYTHONPATH_SET="true"
-    elif [ -n "$PYTHON" ]; then
-      PYTHON=""  # Still missing dependencies
-    fi
+    # Set PYTHONPATH for workspace venv to allow importing gpt2giga from source
+    export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+    PYTHONPATH_SET="true"
   fi
 fi
 
@@ -292,5 +292,23 @@ fi
 
 # Run the indexer
 cd "$ROOT_DIR"
-exec $PYTHON -m gpt2giga index-codebase "${CMD_ARGS[@]}"
+
+# Use main() function which handles subcommands properly
+# Build Python list from bash array for sys.argv
+CMD_ARGS_STR=""
+for arg in "${CMD_ARGS[@]}"; do
+  # Escape single quotes in the argument
+  escaped_arg=$(printf '%s\n' "$arg" | sed "s/'/'\"'\"'/g")
+  CMD_ARGS_STR="${CMD_ARGS_STR}'${escaped_arg}', "
+done
+
+# Use main() function which handles subcommands properly
+# This works after dependencies are installed
+exec $PYTHON << PYTHON_EOF
+import sys
+sys.path.insert(0, '$ROOT_DIR')
+from gpt2giga import main
+sys.argv = ['gpt2giga', 'index-codebase', ${CMD_ARGS_STR%', '}]
+main()
+PYTHON_EOF
 
