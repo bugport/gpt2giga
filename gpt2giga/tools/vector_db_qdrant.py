@@ -97,6 +97,39 @@ class QdrantVectorDB(VectorDB):
         )
         return result.deleted_count if hasattr(result, "deleted_count") else 0
 
+    async def search(
+        self,
+        collection_name: str,
+        query_embedding: List[float],
+        top_k: int = 5,
+        min_similarity: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """Search for similar documents using Qdrant search API."""
+        from qdrant_client.models import SearchRequest
+        
+        try:
+            # Search using Qdrant API
+            search_results = self.client.search(
+                collection_name=collection_name,
+                query_vector=query_embedding,
+                limit=top_k,
+                score_threshold=min_similarity,
+            )
+            
+            results = []
+            for result in search_results:
+                payload = result.payload or {}
+                results.append({
+                    "text": payload.get("text", ""),
+                    "metadata": {k: v for k, v in payload.items() if k != "text"},
+                    "similarity": float(result.score) if hasattr(result, "score") else 0.0,
+                })
+            
+            return results
+        except Exception:
+            # Return empty list on error
+            return []
+
     async def close(self):
         """Close database connection."""
         # Qdrant client doesn't require explicit close

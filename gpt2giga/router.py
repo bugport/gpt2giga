@@ -619,7 +619,63 @@ async def chat_completions(request: Request):
     max_input_tokens = limits["max_input_tokens"]
     max_output_tokens = limits["max_output_tokens"]
     
-    # Validate and truncate input messages
+    # RAG: Retrieve relevant code context if enabled (BEFORE token validation)
+    rag_retriever = getattr(request.app.state, "rag_retriever", None)
+    if rag_retriever:
+        # Extract user query from messages
+        user_messages = [
+            msg for msg in data.get("messages", [])
+            if msg.get("role") == "user"
+        ]
+        
+        if user_messages:
+            last_user_message = user_messages[-1].get("content", "")
+            
+            # Retrieve relevant code context
+            try:
+                rag_results = await rag_retriever.retrieve_context(last_user_message)
+                
+                if rag_results:
+                    # Format context
+                    context = rag_retriever.format_context_for_messages(rag_results)
+                    
+                    # Inject context into system message or prepend to user message
+                    messages = data.get("messages", [])
+                    has_system = any(msg.get("role") == "system" for msg in messages)
+                    
+                    if has_system:
+                        # Prepend context to first system message
+                        for i, msg in enumerate(messages):
+                            if msg.get("role") == "system":
+                                messages[i]["content"] = (
+                                    f"{msg['content']}\n\n"
+                                    f"Relevant code context from the codebase:\n{context}"
+                                )
+                                break
+                    else:
+                        # Insert context as new system message at the beginning
+                        context_message = {
+                            "role": "system",
+                            "content": (
+                                "You are a code review assistant. "
+                                "Here is relevant code context from the codebase:\n\n"
+                                f"{context}\n\n"
+                                "Use this context to provide helpful code reviews and answers."
+                            )
+                        }
+                        messages.insert(0, context_message)
+                    
+                    data["messages"] = messages
+                    
+                    logger = getattr(request.app.state, "logger", None)
+                    if logger:
+                        logger.info(f"Injected {len(rag_results)} code chunks into chat context")
+            except Exception as e:
+                logger = getattr(request.app.state, "logger", None)
+                if logger:
+                    logger.warning(f"RAG retrieval failed: {e}, proceeding without context")
+    
+    # Validate and truncate input messages (AFTER RAG injection)
     if "messages" in data and isinstance(data["messages"], list):
         input_tokens = _count_message_tokens(data["messages"], gpt_model)
         if input_tokens > max_input_tokens:

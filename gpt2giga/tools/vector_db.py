@@ -24,6 +24,24 @@ class VectorDB(ABC):
         pass
 
     @abstractmethod
+    async def search(
+        self,
+        collection_name: str,
+        query_embedding: List[float],
+        top_k: int = 5,
+        min_similarity: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """Search for similar documents using cosine similarity.
+        
+        Returns list of documents with metadata, ordered by similarity (highest first).
+        Each document dict contains:
+        - text: str - document text
+        - metadata: dict - document metadata
+        - similarity: float - cosine similarity score (0.0 to 1.0)
+        """
+        pass
+
+    @abstractmethod
     async def close(self):
         """Close database connection."""
         pass
@@ -88,6 +106,105 @@ class SimpleVectorDB(VectorDB):
             if metadata.get(key) != value:
                 return False
         return True
+
+    async def search(
+        self,
+        collection_name: str,
+        query_embedding: List[float],
+        top_k: int = 5,
+        min_similarity: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """Search using cosine similarity (simple implementation)."""
+        if collection_name not in self.collections:
+            return []
+        
+        try:
+            import numpy as np
+        except ImportError:
+            # Fallback to pure Python cosine similarity if numpy not available
+            return self._search_pure_python(collection_name, query_embedding, top_k, min_similarity)
+        
+        results = []
+        query_vec = np.array(query_embedding, dtype=float)
+        query_norm = np.linalg.norm(query_vec)
+        
+        if query_norm == 0:
+            return []
+        
+        for doc in self.collections[collection_name]:
+            doc_embedding = doc.get("embedding", [])
+            if not doc_embedding or len(doc_embedding) != len(query_embedding):
+                continue
+                
+            try:
+                doc_vec = np.array(doc_embedding, dtype=float)
+                doc_norm = np.linalg.norm(doc_vec)
+                
+                if doc_norm == 0:
+                    continue
+                
+                # Cosine similarity
+                similarity = float(np.dot(query_vec, doc_vec) / (query_norm * doc_norm))
+                
+                if similarity >= min_similarity:
+                    results.append({
+                        "text": doc.get("text", ""),
+                        "metadata": doc.get("metadata", {}),
+                        "similarity": similarity,
+                    })
+            except (ValueError, TypeError):
+                # Skip invalid embeddings
+                continue
+        
+        # Sort by similarity (descending) and return top_k
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[:top_k]
+    
+    def _search_pure_python(
+        self,
+        collection_name: str,
+        query_embedding: List[float],
+        top_k: int = 5,
+        min_similarity: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """Pure Python cosine similarity (fallback if numpy not available)."""
+        if collection_name not in self.collections:
+            return []
+        
+        def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+            """Calculate cosine similarity between two vectors."""
+            if len(vec1) != len(vec2):
+                return 0.0
+            
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            norm1 = sum(a * a for a in vec1) ** 0.5
+            norm2 = sum(b * b for b in vec2) ** 0.5
+            
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            
+            return dot_product / (norm1 * norm2)
+        
+        results = []
+        for doc in self.collections[collection_name]:
+            doc_embedding = doc.get("embedding", [])
+            if not doc_embedding:
+                continue
+            
+            try:
+                similarity = cosine_similarity(query_embedding, doc_embedding)
+                
+                if similarity >= min_similarity:
+                    results.append({
+                        "text": doc.get("text", ""),
+                        "metadata": doc.get("metadata", {}),
+                        "similarity": similarity,
+                    })
+            except (ValueError, TypeError):
+                continue
+        
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[:top_k]
 
     async def close(self):
         """Close database connection."""

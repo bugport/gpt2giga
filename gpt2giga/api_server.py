@@ -156,6 +156,47 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # Initialize RAG if enabled
+    rag_enabled = os.getenv("GPT2GIGA_RAG_ENABLED", "false").lower() == "true"
+    if rag_enabled:
+        try:
+            from gpt2giga.rag.retriever import RAGRetriever
+            from gpt2giga.tools.vector_db import create_vector_db
+            
+            rag_collection = os.getenv("GPT2GIGA_RAG_COLLECTION_NAME") or "codebase"
+            rag_db_type = os.getenv("GPT2GIGA_RAG_VECTOR_DB_TYPE", "simple")
+            rag_db_url = os.getenv("GPT2GIGA_RAG_VECTOR_DB_URL")
+            rag_db_api_key = os.getenv("GPT2GIGA_RAG_VECTOR_DB_API_KEY")
+            rag_top_k = int(os.getenv("GPT2GIGA_RAG_TOP_K", "5") or 5)
+            rag_min_sim = float(os.getenv("GPT2GIGA_RAG_MIN_SIMILARITY", "0.7") or 0.7)
+            
+            rag_vector_db = create_vector_db(
+                db_type=rag_db_type,
+                db_url=rag_db_url,
+                api_key=rag_db_api_key,
+            )
+            
+            # Use proxy host/port for internal API calls
+            rag_gpt2giga_url = f"http://{config.proxy_settings.host}:{config.proxy_settings.port}"
+            
+            rag_retriever = RAGRetriever(
+                vector_db=rag_vector_db,
+                collection_name=rag_collection,
+                gpt2giga_url=rag_gpt2giga_url,
+                embedding_model=config.proxy_settings.embeddings,
+                top_k=rag_top_k,
+                min_similarity=rag_min_sim,
+                logger=logger,
+            )
+            
+            app.state.rag_retriever = rag_retriever
+            logger.info(f"RAG enabled with collection '{rag_collection}', top_k={rag_top_k}, min_similarity={rag_min_sim}")
+        except Exception as e:
+            logger.error(f"Failed to initialize RAG: {e}", exc_info=True)
+            app.state.rag_retriever = None
+    else:
+        app.state.rag_retriever = None
+
     # Initialize uptime/idle watcher state
     try:
         # Monotonic start time for system-wide averages
@@ -276,6 +317,14 @@ async def lifespan(app: FastAPI):
         http_client = getattr(app.state, "http_client", None)
         if http_client:
             await http_client.aclose()
+    except Exception:
+        pass
+
+    # Close RAG vector DB if enabled
+    try:
+        rag_retriever = getattr(app.state, "rag_retriever", None)
+        if rag_retriever and hasattr(rag_retriever, "vector_db"):
+            await rag_retriever.vector_db.close()
     except Exception:
         pass
 
