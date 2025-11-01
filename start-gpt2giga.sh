@@ -74,12 +74,19 @@ done
 # .env handling (optional): point ENV_FILE to a custom path if needed
 ENV_FILE="${CLI_ENV_FILE:-${ENV_FILE:-$ROOT_DIR/.env}}"
 if [ -f "$ENV_FILE" ]; then
-  # Export non-comment lines KEY=VALUE from .env
-  # shellcheck disable=SC2046
-  env_vars=$(grep -v '^#' "$ENV_FILE" | sed -e '/^$/d' | grep -v '^[[:space:]]*$' || true)
-  if [ -n "$env_vars" ]; then
-    export $(echo "$env_vars")
-  fi
+  # Export valid KEY=VALUE lines from .env (skip comments and invalid lines)
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip empty lines, comments, and lines without '='
+    line_trimmed=$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    if [ -n "$line_trimmed" ] && [ "${line_trimmed#\#}" = "$line_trimmed" ] && [ "${line_trimmed#*=}" != "$line_trimmed" ]; then
+      # Only export if it looks like a valid KEY=VALUE assignment
+      key="${line_trimmed%%=*}"
+      # Check if key is a valid identifier (starts with letter/underscore, contains only alphanumeric/underscore)
+      if echo "$key" | grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*$'; then
+        export "$line_trimmed" 2>/dev/null || true
+      fi
+    fi
+  done < "$ENV_FILE"
 fi
 
 # If forcing no verification, override env and clear global cert envs
