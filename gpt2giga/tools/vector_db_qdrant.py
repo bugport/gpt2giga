@@ -1,5 +1,6 @@
 """Qdrant vector database adapter."""
 
+import os
 from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -9,7 +10,24 @@ from gpt2giga.tools.vector_db import VectorDB
 class QdrantVectorDB(VectorDB):
     """Qdrant vector database adapter."""
 
-    def __init__(self, url: Optional[str] = None, api_key: Optional[str] = None):
+    def __init__(
+        self, 
+        url: Optional[str] = None, 
+        api_key: Optional[str] = None,
+        verify_ssl: Optional[bool] = None,
+    ):
+        # Determine SSL verification setting
+        # Default: True for HTTPS, False for HTTP, or from env var
+        if verify_ssl is None:
+            verify_ssl_str = os.getenv("GPT2GIGA_QDRANT_VERIFY_SSL", "").lower()
+            if verify_ssl_str in ("false", "0", "no", "off"):
+                verify_ssl = False
+            elif verify_ssl_str in ("true", "1", "yes", "on"):
+                verify_ssl = True
+            else:
+                # Auto-detect from URL: False for HTTP, True for HTTPS (unless env says otherwise)
+                verify_ssl = None  # Let QdrantClient use defaults
+        
         try:
             if url:
                 # Normalize URL: ensure it has a scheme
@@ -27,7 +45,7 @@ class QdrantVectorDB(VectorDB):
                     use_https = parsed.scheme == "https"
                     prefix = parsed.path.rstrip("/") if parsed.path and parsed.path != "/" else None
                     
-                    # Only pass api_key if it's not None and not empty
+                    # Build client kwargs
                     client_kwargs = {
                         "host": host,
                         "port": port,
@@ -38,13 +56,28 @@ class QdrantVectorDB(VectorDB):
                     if api_key:
                         client_kwargs["api_key"] = api_key
                     
+                    # Add SSL verification setting if explicitly set
+                    # Note: QdrantClient may use httpx internally, which supports verify parameter
+                    # Some versions might not support this, so we'll try it and catch errors
+                    if verify_ssl is not None:
+                        try:
+                            # Try to pass verify parameter (for newer versions that support it)
+                            client_kwargs["verify"] = verify_ssl
+                        except Exception:
+                            # If verify is not supported, we'll handle it in the exception below
+                            pass
+                    
                     self.client = QdrantClient(**client_kwargs)
                 except Exception as parse_error:
                     # Fallback to URL-based initialization if parsing fails
-                    # Only pass api_key if it's provided
                     client_kwargs = {"url": url_normalized}
                     if api_key:
                         client_kwargs["api_key"] = api_key
+                    if verify_ssl is not None:
+                        try:
+                            client_kwargs["verify"] = verify_ssl
+                        except Exception:
+                            pass
                     self.client = QdrantClient(**client_kwargs)
             else:
                 # Default to localhost:6333
@@ -55,6 +88,25 @@ class QdrantVectorDB(VectorDB):
                 f"This might indicate QdrantClient is trying to access a local file. "
                 f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
                 f"Original error: {e}"
+            ) from e
+        except (OSError, ValueError, AttributeError) as e:
+            # Common SSL context errors
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['ssl', 'context', 'certificate', 'verify', 'cert']):
+                raise RuntimeError(
+                    f"Failed to initialize Qdrant client due to SSL/TLS error: {e}. "
+                    f"URL: {url or 'localhost:6333'}, HTTPS: {url and url.startswith('https://') if url else False}. "
+                    f"This might be due to:\n"
+                    f"  - SSL certificate verification failing (try setting GPT2GIGA_QDRANT_VERIFY_SSL=false)\n"
+                    f"  - Missing SSL certificates on the system\n"
+                    f"  - Using HTTPS when server only supports HTTP (try http:// instead)\n"
+                    f"If using HTTP (not HTTPS), this error shouldn't occur. "
+                    f"Check your URL: ensure it uses 'http://' for non-SSL connections."
+                ) from e
+            raise RuntimeError(
+                f"Failed to initialize Qdrant client: {e}. "
+                f"URL: {url or 'localhost:6333'}, API key: {'provided' if api_key else 'none'}. "
+                f"Make sure Qdrant server is running and accessible at the URL."
             ) from e
         except Exception as e:
             raise RuntimeError(

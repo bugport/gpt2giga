@@ -238,7 +238,15 @@ def create_vector_db(
             ) from e
         
         try:
-            return QdrantVectorDB(url=db_url, api_key=api_key)
+            # Get verify_ssl from env if not explicitly passed
+            verify_ssl_str = os.getenv("GPT2GIGA_QDRANT_VERIFY_SSL", "").lower() if db_url else None
+            verify_ssl = None
+            if verify_ssl_str in ("false", "0", "no", "off"):
+                verify_ssl = False
+            elif verify_ssl_str in ("true", "1", "yes", "on"):
+                verify_ssl = True
+            
+            return QdrantVectorDB(url=db_url, api_key=api_key, verify_ssl=verify_ssl)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to create Qdrant vector DB: {e}. "
