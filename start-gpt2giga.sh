@@ -76,7 +76,10 @@ ENV_FILE="${CLI_ENV_FILE:-${ENV_FILE:-$ROOT_DIR/.env}}"
 if [ -f "$ENV_FILE" ]; then
   # Export non-comment lines KEY=VALUE from .env
   # shellcheck disable=SC2046
-  export $(grep -v '^#' "$ENV_FILE" | sed -e '/^$/d')
+  env_vars=$(grep -v '^#' "$ENV_FILE" | sed -e '/^$/d' | grep -v '^[[:space:]]*$' || true)
+  if [ -n "$env_vars" ]; then
+    export $(echo "$env_vars")
+  fi
 fi
 
 # If forcing no verification, override env and clear global cert envs
