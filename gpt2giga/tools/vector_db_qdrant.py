@@ -229,7 +229,7 @@ class QdrantVectorDB(VectorDB):
         collection_name: str,
         documents: List[Dict[str, Any]],
     ) -> int:
-        """Upsert documents into collection."""
+        """Upsert documents into collection with retry logic for timeouts."""
         if not documents:
             return 0
 
@@ -266,9 +266,48 @@ class QdrantVectorDB(VectorDB):
                 )
             )
 
-        # Upsert points
-        self.client.upsert(collection_name=collection_name, points=points)
-        return len(points)
+        # Upsert points with retry logic for timeouts
+        import asyncio
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                # Run upsert in a thread pool to avoid blocking
+                # QdrantClient.upsert is synchronous, so we use asyncio.to_thread
+                if hasattr(asyncio, 'to_thread'):
+                    # Python 3.9+
+                    await asyncio.to_thread(
+                        self.client.upsert,
+                        collection_name=collection_name,
+                        points=points
+                    )
+                else:
+                    # Python 3.8 fallback
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: self.client.upsert(
+                            collection_name=collection_name,
+                            points=points
+                        )
+                    )
+                return len(points)
+            except Exception as e:
+                error_str = str(e).lower()
+                is_timeout = any(
+                    keyword in error_str
+                    for keyword in ['timeout', 'timed out', 'timedout', 'deadline exceeded']
+                )
+                
+                if is_timeout and attempt < max_retries - 1:
+                    # Wait before retry with exponential backoff
+                    wait_time = retry_delay * (2 ** attempt)
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Re-raise if not a timeout or out of retries
+                    raise
 
     async def delete_by_metadata(
         self, collection_name: str, metadata_filter: Dict[str, Any]

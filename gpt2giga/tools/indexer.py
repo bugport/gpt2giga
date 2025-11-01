@@ -140,16 +140,40 @@ class CodebaseIndexer:
                 }
             )
 
-        # Store in vector DB
+        # Store in vector DB with chunking to avoid timeouts
         try:
-            stored_count = await self.vector_db.upsert(
-                self.collection_name, documents
+            # Split documents into smaller batches to avoid timeouts
+            batch_store_size = int(os.getenv("GPT2GIGA_INDEXER_STORE_BATCH_SIZE", "50") or 50)
+            total_stored = 0
+            
+            for i in range(0, len(documents), batch_store_size):
+                batch_docs = documents[i : i + batch_store_size]
+                try:
+                    stored_count = await self.vector_db.upsert(
+                        self.collection_name, batch_docs
+                    )
+                    total_stored += stored_count
+                    self.logger.debug(
+                        f"Stored batch {i//batch_store_size + 1} "
+                        f"({len(batch_docs)} documents) in collection '{self.collection_name}'"
+                    )
+                except Exception as batch_error:
+                    # Log batch error but continue with next batch
+                    self.logger.warning(
+                        f"Error storing batch {i//batch_store_size + 1} "
+                        f"({len(batch_docs)} documents): {batch_error}. Continuing..."
+                    )
+                    stats["errors"].append(
+                        f"Error storing batch {i//batch_store_size + 1}: {str(batch_error)}"
+                    )
+            
+            stats["documents_stored"] = total_stored
+            self.logger.info(
+                f"Stored {total_stored}/{len(documents)} documents in collection '{self.collection_name}'"
             )
-            stats["documents_stored"] = stored_count
-            self.logger.info(f"Stored {stored_count} documents in collection '{self.collection_name}'")
         except Exception as e:
             error_msg = f"Error storing documents: {str(e)}"
-            self.logger.error(error_msg)
+            self.logger.error(error_msg, exc_info=True)
             stats["errors"].append(error_msg)
 
         return stats
