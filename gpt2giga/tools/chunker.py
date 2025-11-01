@@ -4,15 +4,48 @@ import tiktoken
 from typing import List, Optional
 
 
+def _get_safe_encoding(model: str = None):
+    """Get tiktoken encoding with fallback to avoid network errors."""
+    try:
+        if model:
+            return tiktoken.encoding_for_model(model)
+    except Exception:
+        pass
+    
+    # Fallback to cl100k_base (GPT-3.5/4 encoding) if model-specific encoding fails
+    try:
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        # Last resort: return a dummy encoding that won't fail
+        try:
+            return tiktoken.get_encoding("gpt2")  # Most basic encoding
+        except Exception:
+            # If all else fails, return None and caller should handle
+            return None
+
+
 class CodeChunker:
     """Chunks code appropriately for embedding."""
 
     def __init__(self, max_tokens: int = 1000, model: str = "gpt-4"):
         self.max_tokens = max_tokens
-        self.encoding = tiktoken.encoding_for_model(model)
+        self.encoding = _get_safe_encoding(model)
+        if self.encoding is None:
+            # Fallback: use cl100k_base or gpt2 if available
+            try:
+                self.encoding = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                try:
+                    self.encoding = tiktoken.get_encoding("gpt2")
+                except Exception:
+                    self.encoding = None  # Will use fallback counting in _count_tokens
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens in text."""
+        if self.encoding is None:
+            # Fallback: approximate 4 chars per token
+            return len(text) // 4
+        
         try:
             return len(self.encoding.encode(text))
         except Exception:

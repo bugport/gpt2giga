@@ -148,13 +148,34 @@ def _get_completions_limits(app, model_name: str) -> dict:
     }
 
 
+def _get_safe_encoding(model_name: str = None):
+    """Get tiktoken encoding with fallback to avoid network errors."""
+    try:
+        if model_name:
+            enc = tiktoken.encoding_for_model(model_name)
+            return enc
+    except Exception:
+        pass
+    
+    # Fallback to cl100k_base (GPT-3.5/4 encoding) if model-specific encoding fails
+    try:
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        # Last resort: return a dummy encoding that won't fail
+        try:
+            return tiktoken.get_encoding("gpt2")  # Most basic encoding
+        except Exception:
+            # If all else fails, return None and caller should handle
+            return None
+
+
 def _count_message_tokens(messages: list, model_name: str) -> int:
     """Count tokens in a list of messages using tiktoken."""
-    try:
-        enc = tiktoken.encoding_for_model(model_name)
-    except Exception:
-        # Fallback to cl100k_base (GPT-3.5/4 encoding)
-        enc = tiktoken.get_encoding("cl100k_base")
+    enc = _get_safe_encoding(model_name)
+    if enc is None:
+        # Last resort: approximate 4 chars per token
+        total_chars = sum(len(str(msg.get("content", ""))) for msg in messages)
+        return total_chars // 4
     
     num_tokens = 0
     for message in messages:
@@ -984,10 +1005,23 @@ async def _embeddings_async(request: Request):
             # Check if first element is int (token IDs) or list[int]
             if isinstance(inputs[0], int):
                 # Single token ID sequence - decode to single string
-                new_inputs = [tiktoken.encoding_for_model(gpt_model).decode(inputs)]
+                enc = _get_safe_encoding(gpt_model)
+                if enc is None:
+                    return Response(
+                        status_code=400,
+                        content=json.dumps({"error": {"message": "encoding error: cannot decode token IDs", "type": "invalid_request_error"}}),
+                        media_type="application/json",
+                    )
+                new_inputs = [enc.decode(inputs)]
             elif isinstance(inputs[0], list) and inputs[0] and isinstance(inputs[0][0], int):
                 # List of token ID sequences - decode each
-                enc = tiktoken.encoding_for_model(gpt_model)
+                enc = _get_safe_encoding(gpt_model)
+                if enc is None:
+                    return Response(
+                        status_code=400,
+                        content=json.dumps({"error": {"message": "encoding error: cannot decode token IDs", "type": "invalid_request_error"}}),
+                        media_type="application/json",
+                    )
                 for row in inputs:
                     if isinstance(row, list) and all(isinstance(x, int) for x in row):
                         new_inputs.append(enc.decode(row))
@@ -1084,17 +1118,20 @@ async def _embeddings_async(request: Request):
             return out
         return resp
 
-    try:
-        enc = tiktoken.encoding_for_model(gpt_model)
-    except Exception as e:
+    enc = _get_safe_encoding(gpt_model)
+    if enc is None:
         logger = getattr(request.app.state, "logger", None)
         if logger:
-            logger.warning("Error getting encoding for model %s: %s", gpt_model, str(e))
-        return Response(
-            status_code=400,
-            content=json.dumps({"error": {"message": f"invalid model or encoding error: {str(e)}", "type": "invalid_request_error"}}),
-            media_type="application/json",
-        )
+            logger.warning("Error getting encoding for model %s, using fallback", gpt_model)
+        # Try fallback encoding
+        try:
+            enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": {"message": "encoding error: cannot initialize tokenizer", "type": "invalid_request_error"}}),
+                media_type="application/json",
+            )
     
     per_input_chunks: list[list[str]] = []
     flat_chunks: list[str] = []
