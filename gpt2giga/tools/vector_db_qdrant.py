@@ -10,10 +10,17 @@ class QdrantVectorDB(VectorDB):
     """Qdrant vector database adapter."""
 
     def __init__(self, url: Optional[str] = None, api_key: Optional[str] = None):
-        if url:
-            self.client = QdrantClient(url=url, api_key=api_key)
-        else:
-            self.client = QdrantClient(host="localhost", port=6333)
+        try:
+            if url:
+                self.client = QdrantClient(url=url, api_key=api_key)
+            else:
+                self.client = QdrantClient(host="localhost", port=6333)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to initialize Qdrant client: {e}. "
+                f"URL: {url or 'localhost:6333'}. "
+                f"Make sure Qdrant server is running or the URL is correct."
+            ) from e
 
     async def _ensure_collection(self, collection_name: str, vector_size: int = 1024):
         """Ensure collection exists with proper configuration."""

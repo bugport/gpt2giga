@@ -337,11 +337,20 @@ def index_codebase_cli():
 
     # Create components
     try:
+        logger.info(f"Creating vector DB (type: {vector_db_type}, url: {vector_db_url or 'default'})...")
         vector_db = create_vector_db(
             db_type=vector_db_type, db_url=vector_db_url, api_key=vector_db_api_key
         )
+        logger.info(f"Vector DB created successfully: {type(vector_db).__name__}")
     except Exception as e:
-        logger.error(f"Failed to create vector DB: {e}")
+        logger.error(f"Failed to create vector DB: {e}", exc_info=True)
+        logger.error(
+            f"Troubleshooting:\n"
+            f"  - For Qdrant: Make sure Qdrant server is running (check http://localhost:6333/health)\n"
+            f"  - For simple: No additional setup needed\n"
+            f"  - Check URL format: {vector_db_url or 'N/A'}\n"
+            f"  - Verify vector DB type: {vector_db_type}"
+        )
         sys.exit(1)
 
     embedder = CodebaseEmbedder(

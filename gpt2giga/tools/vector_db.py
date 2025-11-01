@@ -217,18 +217,37 @@ def create_vector_db(
     api_key: Optional[str] = None,
 ) -> VectorDB:
     """Factory function to create vector DB instance."""
-    if db_type == "simple" or db_type == "memory":
+    # Normalize db_type to lowercase for case-insensitive matching
+    db_type_normalized = db_type.lower().strip() if db_type else "simple"
+    
+    if db_type_normalized == "simple" or db_type_normalized == "memory":
         return SimpleVectorDB()
-    elif db_type == "qdrant":
+    elif db_type_normalized == "qdrant":
         try:
             from gpt2giga.tools.vector_db_qdrant import QdrantVectorDB
-
-            return QdrantVectorDB(url=db_url, api_key=api_key)
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
-                "Qdrant support requires 'qdrant-client' package. "
-                "Install with: pip install qdrant-client"
-            )
+                f"Qdrant support requires 'qdrant-client' package. "
+                f"Install with: pip install qdrant-client\n"
+                f"Original error: {e}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to import QdrantVectorDB module: {e}. "
+                f"Make sure the module file exists at gpt2giga/tools/vector_db_qdrant.py"
+            ) from e
+        
+        try:
+            return QdrantVectorDB(url=db_url, api_key=api_key)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to create Qdrant vector DB: {e}. "
+                f"URL: {db_url or 'localhost:6333'}. "
+                f"Check if Qdrant server is running and accessible."
+            ) from e
     else:
-        raise ValueError(f"Unsupported vector DB type: {db_type}")
+        raise ValueError(
+            f"Unsupported vector DB type: '{db_type}' (normalized: '{db_type_normalized}'). "
+            f"Supported types: 'simple', 'memory', 'qdrant'"
+        )
 
